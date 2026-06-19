@@ -50,7 +50,7 @@ class BatemanEqnSolver:
         queue: deque[tuple[NuclideID, tuple[NuclideID, ...]]] = deque()
         queue.append((self._dag.root, (self._dag.root,)))
 
-        root_lambda = self._dag.nuclides[self._dag.root].decay_const
+        root_lambda = self._dag.read_nuclide_data(self._dag.root_nuclide()).decay_const
 
         # Cache root's trivial sub-expressions (n=1)
         cache[(self._dag.root,)] = BatemanState(
@@ -64,11 +64,12 @@ class BatemanEqnSolver:
             parent_state  = cache[path]         # Extract parent paths cached sub-expressions
 
             # For each new possible path calculate and cache their sub-expressions
-            for daughter, prob in self._dag.nuclides[current].decay_transitions:
-                daughter_lambda = self._dag.nuclides[daughter].decay_const
+            for daughter, prob in self._dag.read_nuclide_data(current).decay_transitions:
+                daughter_lambda = self._dag.read_nuclide_data(daughter).decay_const
                 new_path        = path + (daughter,)
 
-                new_kk      = parent_state.kk * (self._dag.nuclides[current].decay_const * prob / 100.0)
+                new_kk      = parent_state.kk * \
+                    (self._dag.read_nuclide_data(current).decay_const * prob / 100.0)
                 new_lambdas = np.append(parent_state.lambdas, daughter_lambda)
 
                 diffs            = parent_state.lambdas - daughter_lambda

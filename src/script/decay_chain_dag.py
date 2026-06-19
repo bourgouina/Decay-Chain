@@ -72,11 +72,27 @@ class DecayChainDAG:
         )
 
         self.nuclides[nuclide] = Nuclide(
-            nuclide=nuclide,
-            decay_const=decay_const,
-            decay_transitions=decay_transitions
+            nuclide             = nuclide,
+            decay_const         = decay_const,
+            decay_transitions   = decay_transitions
         )
 
         # Set as root of DAG if one does not already exist
         if self.root is None:
             self.root = nuclide
+    
+
+    def root_nuclide(self) -> NuclideID:
+        """ Returns root nuclide of decay chain."""
+
+        return self.root
+    
+
+    def read_nuclide_data(self, nuclide: NuclideID) -> Nuclide:
+        """Returns a `Nuclide` instance copy of the requested nuclide."""
+
+        return Nuclide(
+            nuclide             = self.nuclides[nuclide].nuclide,
+            decay_const         = self.nuclides[nuclide].decay_const,
+            decay_transitions   = self.nuclides[nuclide].decay_transitions
+        )
