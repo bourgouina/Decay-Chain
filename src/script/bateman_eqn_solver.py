@@ -23,7 +23,7 @@ class BatemanState:
 class BatemanEqnSolver:
     def __init__(self, dag: DecayChainDAG):
         """
-        Solves Bateman eqn
+        Solves the Bateman equation. Expects completed DAG as input.
         """
 
         self._dag   = dag
@@ -83,8 +83,7 @@ class BatemanEqnSolver:
         return cache
 
 
-    # ----- Public Methods --------------------
-    def evaluate(self, path: tuple[NuclideID, ...], N0: float, t: np.ndarray) -> np.ndarray:
+    def _evaluate(self, path: tuple[NuclideID, ...], N0: float, t: np.ndarray) -> np.ndarray:
         """
         Evaluates `N(t)` for the terminal nuclide of a path.
             `N(t) = N0 * kk * dot(coeffs, exp(-lambdas * t[:, None]))`
@@ -106,10 +105,11 @@ class BatemanEqnSolver:
         return N0 * state.kk * (exp_terms @ state.coeffs)
  
  
+    # ----- Public Methods --------------------
     def evaluate_all(self, N0: float, t: np.ndarray) -> dict[NuclideID, np.ndarray]:
         """
-        Returns `N(t)` for every nuclide in the chain, summed across all
-        paths that terminate at that nuclide.
+        Returns `N(t)` for every nuclide in the chain, summed across all paths that terminate at 
+        that nuclide.
  
         Parameters
         ----------
@@ -124,7 +124,7 @@ class BatemanEqnSolver:
  
         for path in self._cache:
             terminal = path[-1]
-            N        = self.evaluate(path, N0, t)
+            N        = self._evaluate(path, N0, t)
 
             if terminal in result:
                 result[terminal] += N
