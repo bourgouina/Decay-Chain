@@ -24,10 +24,16 @@ class BatemanEqnSolver:
     def __init__(self, dag: DecayChainDAG):
         """
         Solves the Bateman equation. Expects completed DAG as input.
+        Caches coefficients of different Bateman states and creates batch arrays for fast 
+        calculations on initialization.
         """
 
         self._dag   = dag
-        self._cache = self._compute_bateman_states()
+        self._cache = self._compute_bateman_states()    # Computes and caches Batememan states
+
+        # Build padded batch arrays and grouping matrix from cache for vectorized evaluation
+        self._all_kk, self._all_coeffs, self._all_lambdas, self._nuclides, \
+            self._grouping_matrix = self._build_batch_arrays()
 
 
     # ----- Private Methods --------------------
@@ -37,14 +43,12 @@ class BatemanEqnSolver:
         nuclide of each path from the root.
         """
 
-        # For each path from the root, the values of the sub-expressions of the Bateman eqn for the 
-        # terminal nuclide of the path are cached for easier calculation subsequent sub-expressions
         cache: dict[tuple[NuclideID, ...], BatemanState] = {}
 
-        # Queue also stores path taken along with next nuclide in-order to use it as a key to 
+        # Queue also stores path taken along with next nuclide in order to use it as a key to 
         # quickly access previously calculated sub-expressions
-        queue: deque[tuple[NuclideID, tuple[NuclideID, ...]]] = deque() # Queue for BFS
-        queue.append((self._dag.root, (self._dag.root,)))               # Add root to queue
+        queue: deque[tuple[NuclideID, tuple[NuclideID, ...]]] = deque()
+        queue.append((self._dag.root, (self._dag.root,)))
 
         root_lambda = self._dag.nuclides[self._dag.root].decay_const
 
@@ -83,28 +87,56 @@ class BatemanEqnSolver:
         return cache
 
 
-    def _evaluate(self, path: tuple[NuclideID, ...], N0: float, t: np.ndarray) -> np.ndarray:
+    def _build_batch_arrays(self) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[NuclideID], np.ndarray]:
         """
-        Evaluates `N(t)` for the terminal nuclide of a path.
-            `N(t) = N0 * kk * dot(coeffs, exp(-lambdas * t[:, None]))`
+        Packs cached `BatemanStates` into padded 2D arrays and builds a grouping matrix, all 
+        precomputed once at init.
 
-        Parameters
-        ----------
-        `path`: Tuple of `NuclideID`s from root to terminal nuclide
-        `N0`:   Initial atom count of root nuclide
-        `t`:    1D numpy array of time points (in seconds)
+        Shorter paths are padded to `d_max`:
+        - `coeffs`  padded with 0.0 — padded terms contribute nothing to the dot product
+        - `lambdas` padded with 1.0 — arbitrary non-zero, irrelevant since corresponding `coeffs` 
+          are 0
 
-        Returns
-        --------
-        1D numpy array of atom counts, same shape as `t`
+        grouping_matrix shape (V, P):
+        - `grouping_matrix[v, p]` = 1 if path `p` terminates at nuclide `v`, else 0
+        - Allows grouping via a single matrix multiplication: `N_paths @ grouping_matrix`.
         """
 
-        state     = self._cache[path]
-        exp_terms = np.exp(-state.lambdas * t[:, np.newaxis])
+        paths    = list(self._cache.keys())
+        P        = len(paths)
+        d_max    = max(len(p) for p in paths)
 
-        return N0 * state.kk * (exp_terms @ state.coeffs)
- 
- 
+        # Stores unique terminal nuclides in order of first appearance with iteration through 
+        # paths
+        seen = {}
+
+        for path in paths:
+            t = path[-1]
+
+            if t not in seen:
+                seen[t] = len(seen)
+        
+        nuclides:list[NuclideID]    = list(seen.keys())
+        V                           = len(nuclides)
+
+        # Create batch arrays
+        all_kk           = np.empty(P)
+        all_coeffs       = np.zeros((P, d_max))
+        all_lambdas      = np.ones((P, d_max))
+        grouping_matrix  = np.zeros((V, P))
+
+        for i, path in enumerate(paths):
+            state = self._cache[path]
+            d     = len(state.lambdas)
+
+            all_kk[i]                           = state.kk
+            all_coeffs[i, :d]                   = state.coeffs
+            all_lambdas[i, :d]                  = state.lambdas
+            grouping_matrix[seen[path[-1]], i]  = 1.0
+
+        return all_kk, all_coeffs, all_lambdas, nuclides, grouping_matrix
+
+
     # ----- Public Methods --------------------
     def evaluate_all(self, N0: float, t: np.ndarray) -> dict[NuclideID, np.ndarray]:
         """
@@ -120,15 +152,15 @@ class BatemanEqnSolver:
         -------
         dict mapping `NuclideID` -> 1D atom count array of shape `(len(t),)`
         """
-        result: dict[NuclideID, np.ndarray] = {}
- 
-        for path in self._cache:
-            terminal = path[-1]
-            N        = self._evaluate(path, N0, t)
 
-            if terminal in result:
-                result[terminal] += N
-            else:
-                result[terminal]  = N
- 
-        return result
+        # Calculate exp terms
+        exp_terms = np.exp(-self._all_lambdas[np.newaxis, :, :] * t[:, np.newaxis, np.newaxis])
+
+        # Sum over d_max
+        N_paths = N0 * self._all_kk[np.newaxis, :] * \
+            (exp_terms * self._all_coeffs[np.newaxis, :, :]).sum(axis=-1)
+
+        # Group by terminal nuclide via matrix multiplication
+        N_nuclides = N_paths @ self._grouping_matrix.T
+
+        return {nuclide: N_nuclides[:, v] for v, nuclide in enumerate(self._nuclides)}
