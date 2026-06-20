@@ -114,5 +114,5 @@ class DecayChainDAG:
         return Nuclide(
             nuclide             = self.nuclides[nuclide].nuclide,
             decay_const         = self.nuclides[nuclide].decay_const,
-            decay_transitions   = self.nuclides[nuclide].decay_transitions
+            decay_transitions   = self.nuclides[nuclide].decay_transitions.copy()
         )
