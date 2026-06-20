@@ -50,7 +50,6 @@ class DecayChainDAG:
         represents the % chance of that decay transition occuring.
         """
 
-        self.root: NuclideID = None                     # Original nuclide = root
         self.nuclides: dict[NuclideID, Nuclide] = {}
     
 
@@ -76,17 +75,6 @@ class DecayChainDAG:
             decay_const         = decay_const,
             decay_transitions   = decay_transitions
         )
-
-        # Set as root of DAG if one does not already exist
-        if self.root is None:
-            self.root = nuclide
-    
-
-    def root_nuclide(self) -> NuclideID:
-        """ Returns root nuclide of decay chain."""
-
-        return self.root
-    
 
     def read_nuclide_data(self, nuclide: NuclideID) -> Nuclide:
         """Returns a `Nuclide` instance copy of the requested nuclide."""
