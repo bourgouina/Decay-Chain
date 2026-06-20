@@ -236,98 +236,122 @@ return {nuclide: N_nuclides[:, v] for v, nuclide in enumerate(self._nuclides)}
 
 ## Time Complexity
 
-Let:
-- $P$ = total number of unique root-to-node paths in the DAG
-- $d$ = $d_{max}$ = maximum chain depth (longest root-to-leaf path)
-- $T$ = number of timestamps in the evaluation array
-- $V$ = number of unique terminal nuclides
+### Physics-bounded parameters
+
+Unlike general graph algorithms, the parameters here are hard-capped by nuclear physics:
+
+| Parameter | Symbol | Physics bound | Typical value |
+|---|---|---|---|
+| Max chain depth | $d$ | ~25 observed [2], ~40 exotic hard cap | 6-15 |
+| Max branches per nuclide | $B$ | 3 (IAEA Livechart `decay_1/2/3` fields) [1] | 1-2 |
+| Max paths per chain | $P$ | $\frac{3^{d+1}-1}{2}$ theoretical, convergence keeps it low | < 100 |
+| Max unique terminal nuclides | $V$ | $\leq P$ | < 20 |
+| Time points | $T$ | User-defined | 1001 |
+
+$B \leq 3$ is a hard physics bound — the IAEA Livechart only records three concurrent decay modes per nuclide [1]. Chain convergence (branches merging back to common daughters like Pb-209 in Ac-225) keeps $P$ well below $3^d$ in practice.
+
 ### `_compute_bateman_states` — $O(P \cdot d)$
- 
+
 Each BFS step extends one path by one nuclide. Per step:
 - `np.append(lambdas)` — $O(d)$, copies the array
 - `diffs = lambdas - daughter_lambda` — $O(d)$
 - `new_coeffs[:-1] = coeffs / diffs` — $O(d)$
 - `new_coeffs[-1] = 1 / np.prod(-diffs)` — $O(d)$
 
-There are $P$ such steps total, giving $O(P \cdot d)$. All operations are numpy — no pure Python loops over nuclides.
- 
+There are $P$ such steps total, giving $O(P \cdot d)$. With physics bounds: $O(100 \cdot 25) = O(2500)$ — effectively constant. All operations are numpy — no pure Python loops over nuclides.
+
 ### `_build_batch_arrays` — $O(P \cdot d)$
- 
-One pass over all $P$ cached states to fill `all_kk`, `all_coeffs`, `all_lambdas`, and `grouping_matrix`. Each fill is $O(d)$ per path (copying `coeffs` and `lambdas` slices). Total: $O(P \cdot d)$.
- 
-### `evaluate_all` — $O(T \cdot P \cdot d)$
- 
+
+One pass over all $P$ cached states to fill `all_kk`, `all_coeffs`, `all_lambdas`, and `grouping_matrix`. Each fill is $O(d)$ per path. With physics bounds: same as above, effectively constant.
+
+### `evaluate_all` — $O(T \cdot P \cdot (d + V))$
+
 Three numpy operations, each dominant in one dimension:
- 
+
 | Operation | Shape | Cost |
 |---|---|---|
 | `np.exp(...)` | $(T, P, d_{max})$ | $O(T \cdot P \cdot d)$ |
 | `(exp_terms * coeffs).sum(axis=-1)` | $(T, P, d_{max}) \to (T, P)$ | $O(T \cdot P \cdot d)$ |
 | `N_paths @ grouping_matrix.T` | $(T, P) \cdot (P, V) \to (T, V)$ | $O(T \cdot P \cdot V)$ |
 
-$V$ and $d$ are independent — $V$ can exceed $d$ in heavily branching chains where many distinct nuclides appear as leaves. The total for `evaluate_all` is therefore $O(T \cdot P \cdot (d + V))$. Zero Python loops — all operations execute at C level.
- 
+$V$ and $d$ are independent — $V$ can exceed $d$ in heavily branching chains. Total: $O(T \cdot P \cdot (d + V))$.
+
+With physics bounds substituted: $O(T \cdot 100 \cdot (25 + 20)) = O(4500 \cdot T)$. For $T = 1001$: ~4.5 million numpy ops per call — comfortably milliseconds. Zero Python loops — all operations execute at C level.
+
 ### Combined — $O(T \cdot P \cdot (d + V))$
- 
-Precompute steps $O(P \cdot d)$ are dominated by `evaluate_all` since $T \gg 1$. The precompute is paid once at init; `evaluate_all` is the per-call cost.
+
+Precompute steps $O(P \cdot d)$ are dominated by `evaluate_all` since $T \gg 1$. With physics bounds, precompute is effectively $O(1)$ relative to evaluation. Only `evaluate_all` scales meaningfully — and only with $T$, which is user-controlled.
 
 ### Multiple root isotopes
 
 Each `BatemanEqnSolver` instance maintains its own private cache — Bateman states are not shared across solvers. A shared cache is not helpful because `BatemanState` coefficients depend on the full path from the root, so paths from different root isotopes are never equivalent even if they pass through the same nuclides.
 
-The total precompute cost across $R$ root isotopes is therefore $O(R \cdot P \cdot d)$ — each solver runs its own independent BFS.
+The total precompute cost across $R$ root isotopes is therefore $O(R \cdot P \cdot d)$ — each solver runs its own independent BFS. With physics bounds this is $O(R \cdot 2500)$, linear in $R$.
 
 `evaluate_all` cost per call is $O(T \cdot P_{root} \cdot (d + V))$ per solver.
  
 ---
 
 ## Memory Consumption
- 
+
+### Physics-bounded parameters
+
+With $B \leq 3$, $d \leq 25$, $P < 100$, and $V < 20$ for any real decay chain, all memory quantities are effectively bounded constants per solver instance.
+
 ### Per `BatemanState`
- 
+
 For a path of depth $d$, one `BatemanState` stores:
 - `kk` — 1 float64 = 8 bytes
 - `coeffs` — $d$ float64s = $8d$ bytes
 - `lambdas` — $d$ float64s = $8d$ bytes
 
-Total per state: $8(2d + 1) \approx 16d$ bytes. For $d = 40$ (theoretical worst case): ~640 bytes per state.
- 
+Total per state: $8(2d + 1) \approx 16d$ bytes. With physics bound $d \leq 25$: ~400 bytes per state maximum.
+
 ### Cache and batch arrays
- 
-| Structure | Shape | Size |
-|---|---|---|
-| `_cache` | $P$ states of depth $\leq d$ | $\approx 16 \cdot P \cdot d$ bytes |
-| `all_kk` | $(P,)$ | $8P$ bytes |
-| `all_coeffs` | $(P, d_{max})$ | $8 \cdot P \cdot d$ bytes |
-| `all_lambdas` | $(P, d_{max})$ | $8 \cdot P \cdot d$ bytes |
-| `grouping_matrix` | $(V, P)$ | $8 \cdot V \cdot P$ bytes |
- 
-Total precomputed: $\approx 48 \cdot P \cdot d$ bytes. For $P = 1000$, $d = 40$: ~1.9 MB.
+
+| Structure | Shape | General size | Physics-bounded max |
+|---|---|---|---|
+| `_cache` | $P$ states of depth $\leq d$ | $\approx 16 \cdot P \cdot d$ bytes | ~40 KB |
+| `all_kk` | $(P,)$ | $8P$ bytes | ~800 bytes |
+| `all_coeffs` | $(P, d_{max})$ | $8 \cdot P \cdot d$ bytes | ~20 KB |
+| `all_lambdas` | $(P, d_{max})$ | $8 \cdot P \cdot d$ bytes | ~20 KB |
+| `grouping_matrix` | $(V, P)$ | $8 \cdot V \cdot P$ bytes | ~16 KB |
+
+Total per solver instance: **< 100 KB** under physics bounds.
+
+The `grouping_matrix` is the largest single structure relative to $V$ and $P$, but is kept intentionally — it replaces a Python loop over $P$ paths per `evaluate_all` call with a single BLAS matrix multiply. At single-run scale this is a minor win, but at Monte Carlo scale ($10^6$ calls) a Python grouping loop would become the dominant bottleneck. The ~16 KB cost is paid once at init and amortized across all calls.
 
 ### Multiple root isotopes
 
-Each solver holds its own private cache and batch arrays. Total memory across $R$ root isotopes scales as $O(R \cdot P \cdot d)$ for cache and $O(R \cdot P \cdot d)$ for batch arrays — no sharing.
+Each solver holds its own private cache and batch arrays — no sharing. Total memory scales as $O(R \cdot P \cdot d)$, which with physics bounds is $O(R \cdot 100 \text{ KB})$ — negligible even at $R = 1000$.
 
-Note that the **DAG is shared** across all solvers — nuclide data (decay constants, transitions) is stored once regardless of how many solvers reference it. Only the Bateman computation state is per-solver.
- 
+The **DAG is shared** across all solvers — nuclide data (decay constants, transitions) is stored once regardless of how many solvers reference it. Global DAG memory: roughly $5278 \times$ (size of one `Nuclide`) $\approx$ a few MB total.
+
 ### `evaluate_all` working memory
- 
+
 The intermediate `exp_terms` array of shape $(T, P, d_{max})$ is the peak allocation per call:
- 
+
 $$8 \cdot T \cdot P \cdot d_{max} \text{ bytes}$$
- 
-For $T = 1001$, $P = 1000$, $d = 40$: ~320 MB. For realistic chains ($P = 10$, $d = 10$): ~800 KB. 
- 
+
+This is the dominant memory cost and is transient — freed after each call.
+
 ### Path count bounds
- 
+
 The number of paths $P$ is bounded by:
- 
+
 $$P \leq \sum_{k=1}^{d} B^k = \frac{B^{d+1} - 1}{B - 1}$$
- 
-where $B$ is the average branching factor. Physically unreachable worst case ($B = 5$, $d = 40$): $P \leq 5^{40} \approx 10^{28}$. Realistic bounds:
- 
-| Chain | Typical $P$ | Batch array size | `exp_terms` per call |
+
+With physics-bounded $B \leq 3$ and $d \leq 25$: $P \leq \frac{3^{26}-1}{2} \approx 1.1 \times 10^{12}$ theoretical maximum. Chain convergence keeps real-world $P$ far below this:
+
+| Chain | Typical $P$ | Cache + batch size | `exp_terms` per call |
 |---|---|---|---|
-| Ac-225 | ~10 | < 50 KB | < 1 MB |
-| Th-232 (complex) | ~50-100 | < 500 KB | < 40 MB |
-| Theoretical worst case actinide | ~1000 | < 2 MB | ~320 MB |
+| Ac-225 | ~10 | < 5 KB | < 2 MB |
+| Th-232 (complex) | ~50 | < 25 KB | < 10 MB |
+| Worst case realistic | ~100 | < 100 KB | ~20 MB |
+---
+
+## References
+
+[1] International Atomic Energy Agency, Nuclear Data Section, "Live Chart of Nuclides," *IAEA Nuclear Data Services*. [Online]. Available: https://www-nds.iaea.org/relnsd/vcharthtml/VChartHTML.html
+
+[2] R. T. Simmons, "Modeling Radioactive Decay Chains with Branching," M.S. thesis, Dept. of Engineering Physics, Air Force Inst. of Technology, Wright-Patterson AFB, OH, USA, 2012. [Online]. Available: https://scholar.afit.edu/etd/1930
