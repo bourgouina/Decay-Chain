@@ -96,7 +96,7 @@ new_coeffs[-1] = 1.0 / np.prod(-diffs)
 $$kk_{new} = kk_{prev} \cdot \lambda_{2, current} = kk_{prev} \cdot \lambda_{current} \cdot \frac{p}{100}$$
 
 ```python
-new_kk = parent_state.kk * (dag.nuclides[current].decay_const * prob / 100.0)
+new_kk = parent_state.kk * (current_data.decay_const * prob / 100.0)
 ```
 
 **`lambdas` extension** — append the new decay constant:
@@ -116,7 +116,7 @@ $$N_1(t) = N_0 \cdot e^{-\lambda_1 t}$$
 The `kk` prefix is an empty product (no edges yet), which by convention equals 1. `coeffs` and `lambdas` are both length-1 arrays:
 
 ```python
-cache[(dag.root,)] = BatemanState(
+cache[(self._root,)] = BatemanState(
     kk      = 1.0,                      # Empty product
     coeffs  = np.array([1.0]),          # Single term, coefficient = 1
     lambdas = np.array([root_lambda])
@@ -191,7 +191,7 @@ Its pure Python equivalent is:
 for timestamp in T:
     for path in P:
         for i < d_max:
-            result_arr[timestamp, path, i] = exp_terms[timestamp, path, lamdas[i]] + coeffs[path, i]
+            result_arr[timestamp, path, i] = exp_terms[timestamp, path, i] * coeffs[path, i]
 
 # .sum(axis=-1)
 for timestamp in T:
@@ -270,6 +270,14 @@ Since $V \leq P$, total is $O(T \cdot P \cdot d)$. Zero Python loops — and all
 ### Combined — $O(T \cdot P \cdot d)$
  
 Precompute steps $O(P \cdot d)$ are dominated by `evaluate_all` since $T \gg 1$. The precompute is paid once at init; `evaluate_all` is the per-call cost.
+
+### Multiple root isotopes
+
+The `BatemanState` cache is shared across all `BatemanEqnSolver` instances. When processing multiple root isotopes that share sub-paths (e.g. Ac-225 and Ra-223 both pass through Bi-213, Pb-209), those sub-paths are computed only once — the second solver skips them via the `if new_path in self._cache: continue` check.
+ 
+In the best case (heavily overlapping chains), the total cost across $R$ root isotopes is $O(P_{unique} \cdot d)$ for precompute rather than $O(R \cdot P \cdot d)$, where $P_{unique}$ is the number of unique paths across all chains combined. For actinide chains which share most of their daughters, this can reduce precompute cost by an order of magnitude.
+ 
+`evaluate_all` cost per call remains $O(T \cdot P_{root} \cdot d)$ per root since each solver maintains its own batch arrays filtered to its own root's paths — shared cache entries don't bloat the batch arrays of unrelated solvers.
  
 ### Comparison to original script
  
@@ -308,6 +316,14 @@ Total per state: $8(2d + 1) \approx 16d$ bytes. For $d = 40$ (theoretical worst 
 | `grouping_matrix` | $(V, P)$ | $8 \cdot V \cdot P$ bytes |
  
 Total precomputed: $\approx 48 \cdot P \cdot d$ bytes. For $P = 1000$, $d = 40$: ~1.9 MB.
+ 
+### Multiple root isotopes
+ 
+The shared `BatemanState` cache avoids storing duplicate states for overlapping sub-paths across root isotopes. Without sharing, $R$ root isotopes with $P$ paths each would require $R \cdot P$ cache entries. With sharing, only $P_{unique}$ entries are stored — one per unique path across all roots combined.
+ 
+The batch arrays (`all_kk`, `all_coeffs`, `all_lambdas`, `grouping_matrix`) are **not** shared — each solver builds its own filtered to its root's paths. This is intentional: it keeps `evaluate_all` working on a compact $(P_{root}, d_{max})$ array rather than a large $(P_{global}, d_{max})$ one, avoiding unnecessary memory bandwidth during evaluation.
+ 
+For $R = 10$ overlapping actinide chains with 80% path overlap, shared cache reduces memory from $10 \times 1.9$ MB $= 19$ MB to roughly $0.2 \times 19$ MB $= 3.8$ MB for the cache alone. Batch array memory scales with $P_{root}$ per solver and is unaffected.
  
 ### `evaluate_all` working memory
  

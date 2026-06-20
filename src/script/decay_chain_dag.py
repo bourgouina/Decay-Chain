@@ -31,10 +31,14 @@ MAX_TRANSITIONS = 12    # Max no. of different decay transitions types theoretic
 @dataclass
 class Nuclide:
     """
-    Stores relevant nuclide data:
-    - Identification (symbol, meta, mass no.)
-    - Decay constant value (lambda)
-    - Weighted decay transitions to other elements (weights stored as % in 0-100 range)
+    Stores relevant nuclide data.
+ 
+    Attributes
+    ----------
+    - `nuclide`:           Unique identifier for the nuclide as `(symbol, meta, mass_number)`
+    - `decay_const`:       Decay constant lambda (s^-1), where lambda = ln(2) / half_life
+    - `decay_transitions`: Weighted edges to daughter nuclides, weights stored as branching 
+                           probability in % (0-100 range)
     """
 
     nuclide:            NuclideID
@@ -46,8 +50,13 @@ class Nuclide:
 class DecayChainDAG:
     def __init__(self):
         """
-        DAG model to represent a decay chain where the edge weight between nuclides A -> B 
-        represents the % chance of that decay transition occuring.
+        DAG representation of a radioactive decay chain.
+ 
+        Nodes are nuclides identified by `NuclideID`. Directed edges represent decay transitions
+        from parent to daughter nuclide, weighted by branching probability (%).
+ 
+        The graph is shared across all `BatemanEqnSolver` instances — one solver per root nuclide
+        reads from the same DAG. Thread-safe for concurrent reads.
         """
 
         self.nuclides: dict[NuclideID, Nuclide] = {}
@@ -56,8 +65,18 @@ class DecayChainDAG:
     def add_nuclide(self, nuclide: NuclideID, decay_const: float, 
                     decay_transitions: list[TransitionEdge]):
         """
-        Adds a nucleide to the decay chain along with its decay constant (lambda) and weighted 
-        decay transitions (in %).
+        Adds a nuclide node to the decay chain.
+ 
+        Skips silently if the nuclide already exists — physics guarantees the data would be
+        identical regardless of which decay chain first added it.
+ 
+        Parameters
+        ----------
+        -c`nuclide`:            Unique identifier as `(symbol, meta, mass_number)`
+        - `decay_const`:        Decay constant lambda (s^-1)
+        - `decay_transitions`:  List of `(daughter_NuclideID, branching_prob)` edges.
+                                Branching probabilities in % (0-100). Must not exceed 
+                                `MAX_TRANSITIONS` entries.
         """
 
         # Skip addition if nuclide node already exists in DAG 
@@ -77,7 +96,20 @@ class DecayChainDAG:
         )
 
     def read_nuclide_data(self, nuclide: NuclideID) -> Nuclide:
-        """Returns a `Nuclide` instance copy of the requested nuclide."""
+        """
+        Returns a copy of the `Nuclide` data for the requested nuclide.
+ 
+        Returns a copy rather than a direct reference to protect graph integrity when the DAG
+        is shared across multiple solvers and threads.
+ 
+        Parameters
+        ----------
+        - `nuclide`: Unique identifier as `(symbol, meta, mass_number)`
+ 
+        Returns
+        -------
+        `Nuclide` instance copy
+        """
 
         return Nuclide(
             nuclide             = self.nuclides[nuclide].nuclide,
