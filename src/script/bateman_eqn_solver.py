@@ -70,13 +70,12 @@ class BatemanEqnSolver:
 
         root_lambda = self._dag.read_nuclide_data(self._root).decay_const
 
-        # Cache root's trivial sub-expressions (n=1) if it does not already exist
-        if not (self._root,) in self._cache:
-            self._cache[(self._root,)] = BatemanState(
-                kk      = 1.0,
-                coeffs  = np.array([1.0]),
-                lambdas = np.array([root_lambda])
-            )
+        # Cache root's trivial sub-expressions (n=1)
+        self._cache[(self._root,)] = BatemanState(
+            kk      = 1.0,
+            coeffs  = np.array([1.0]),
+            lambdas = np.array([root_lambda])
+        )
 
         while queue:
             current, path = queue.popleft()
