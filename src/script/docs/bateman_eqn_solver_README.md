@@ -354,4 +354,4 @@ With physics-bounded $B \leq 3$ and $d \leq 25$: $P \leq \frac{3^{26}-1}{2} \app
 
 [1] International Atomic Energy Agency, Nuclear Data Section, "Live Chart of Nuclides," *IAEA Nuclear Data Services*. [Online]. Available: https://www-nds.iaea.org/relnsd/vcharthtml/VChartHTML.html
 
-[2] R. T. Simmons, "Modeling Radioactive Decay Chains with Branching," M.S. thesis, Dept. of Engineering Physics, Air Force Inst. of Technology, Wright-Patterson AFB, OH, USA, 2012. [Online]. Available: https://scholar.afit.edu/etd/1930
+[2] R. T. Simmons, "Modeling Radioactive Decay Chains with Branching," M.S. thesis, Dept. of Engineering Physics, Air Force Inst. of Technology, Wright-Patterson AFB, OH, USA, 2012. [Online]. Available: https://scholar.afit.edu/etd/930
