@@ -16,7 +16,7 @@ _LARA_ENSDF_FILE_BASE   = "http://www.lnhb.fr/nuclides"
 _LARA_TXT_FILE_BASE     = "http://www.lnhb.fr/Laraweb/Results"
 _LARA_NUCLIDE_LIST_URL  = "http://www.lnhb.fr/Laraweb/Choix_Lara.php"
 
-_OPTIONS_NUCLIDE_RE     = re.compile(r"(\d+)([A-Z][a-z]?)(\-M)?( EQUI)?")
+_OPTIONS_NUCLIDE_RE     = re.compile(r"(\d+)([A-Z][a-z]?)(\-M)?(EQUI)?")
 FETCH_WORKER_COUNT      = 20
 
 
@@ -96,7 +96,7 @@ class LARADataFetcher:
             # If the regex does not match, then the <option> tag body has some unexpected data
             # To prevent processing incorrect data, raise error and stop the program
             if not m:
-                raise ParseError("<option> tag body contains unexpected data.")
+                raise ParseError(f"<option> tag body contains unexpected data: {text!r}")
             
             mass_num, symbol, isomer, equi = m.groups()
 
@@ -104,7 +104,7 @@ class LARADataFetcher:
             if equi:
                 continue
 
-            nuclide = f"{symbol}-{mass_num}{"m" if isomer else ""}"
+            nuclide = f"{symbol}-{mass_num}{'m' if isomer else ''}"
             nuclides.append(nuclide)
         
         return nuclides
