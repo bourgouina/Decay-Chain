@@ -144,6 +144,7 @@ class LARADataScraper:
         for i, file in enumerate(TMP_DIR_PATH.iterdir()):
             parsed_data[i] = LARADataScraper._parse_file(file)
         
+        NuclideData.order(parsed_data)
         print(f"All {nuclide_count} nuclide data files successfuly parsed.")
         
         # Store data

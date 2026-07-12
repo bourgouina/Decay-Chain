@@ -665,6 +665,7 @@ class LARA_ENSDFParser:
 
         # Extract transitions from raw dataset blocks
         transitions = [self._parse_dataset(b) for b in blocks]
+        TransitionData.order(transitions)
 
         return NuclideData(
             symbol      = symbol,

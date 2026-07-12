@@ -31,6 +31,13 @@ class NuclideData:
     transitions:    list[TransitionData]
 
 
+    @staticmethod
+    def order(nuclides: list[NuclideData]):
+        """Arranges `NuclideData` objects in ascending order inside list."""
+
+        nuclides.sort(key=lambda n: (n.mass_num, n.symbol, n.meta))
+
+
 @dataclass
 class TransitionData:
     """
@@ -52,6 +59,13 @@ class TransitionData:
     decay_type: str
     branch_pct: float
     branch_unc: float | None
+
+
+    @staticmethod
+    def order(transitions: list[TransitionData]):
+        """Arranges `TransitionData` objects in ascending order inside list."""
+
+        transitions.sort(key=lambda t: (t.mass_num, t.symbol, t.meta))
 
 
 # ----- Exceptions --------------------

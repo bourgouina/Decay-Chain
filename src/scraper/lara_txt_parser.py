@@ -166,6 +166,8 @@ class LARA_TxtParser:
                 branch_pct  = branch_pct,
                 branch_unc  = None
             ))
+        
+        TransitionData.order(transitions)
 
         return transitions
 
