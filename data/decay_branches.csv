@@ -1,4 +1,4 @@
-parent_symbol,parent_meta,parent_mass_num,daughter_symbol,daughter_meta,daughter_mass_num,decay_type,branching_ratio,branching_uncertainty
+parent_symbol,parent_meta,parent_mass_num,daughter_symbol,daughter_meta,daughter_mass_num,decay_type,branching_ratio,branching_unc
 H,,3,He,,3,B-,100.0,
 He,,6,Li,,6,B-,100.0,
 Be,,7,Li,,7,EC,100.0,

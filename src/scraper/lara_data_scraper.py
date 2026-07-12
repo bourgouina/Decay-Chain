@@ -19,7 +19,7 @@ NUCLIDES_CSV_HEADER     = ["symbol", "meta", "mass_num",
                            "is_stable", "half_life_s", "decay_const", "decay_unc"]
 TRANSITIONS_CSV_HEADER  = ["parent_symbol", "parent_meta", "parent_mass_num",
                            "daughter_symbol", "daughter_meta", "daughter_mass_num",
-                           "decay_type", "branching_ratio", "branching_uncertainty"]
+                           "decay_type", "branching_ratio", "branching_unc"]
 
 
 # ----- LARAWeb Data Scraper --------------------
