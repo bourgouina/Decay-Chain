@@ -27,7 +27,7 @@ _NUCLIDE_ID_PATTERN = re.compile(r'^([A-Za-z]+)-(\d+)(m)?$')    # <SYMBOL>-<MASS
 _MODE_TOKEN_PATTERN = re.compile(r'^\((.+)\)$')                 # (<DECAY_MODE>)
 
 
-class LARA_LNHBParser:
+class LARA_TxtParser:
     """
     """
 
@@ -154,7 +154,7 @@ class LARA_LNHBParser:
                 raise ParseError(f"Malformed decay-mode token: {mode_str!r}")
 
             # Extract decay type, daughter nuclide identifier and branching ratio + uncertainty
-            decay_type = m.group(1)
+            decay_type = m.group(1) if m.group(1) != "alpha" else "A"
             symbol, mass_num, meta = self._parse_nuclide_id(daughter_str)
             branch_pct = self._parse_float(pct_str, context=f"branch_pct ({daughter_str})")
 
@@ -197,7 +197,7 @@ class LARA_LNHBParser:
 
         try: 
             unc = self._parse_float(unc_str, context=f"{context}_unc")
-        except ValueError:
+        except ParseError:
             unc = None
 
         return (value, unc)

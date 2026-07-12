@@ -17,7 +17,7 @@ _LARA_TXT_FILE_BASE     = "http://www.lnhb.fr/Laraweb/Results"
 _LARA_NUCLIDE_LIST_URL  = "http://www.lnhb.fr/Laraweb/Choix_Lara.php"
 
 _OPTIONS_NUCLIDE_RE     = re.compile(r"(\d+)([A-Z][a-z]?)(\-M)?(EQUI)?")
-FETCH_WORKER_COUNT      = 20
+FETCH_WORKER_COUNT      = 30
 
 
 # ----- Helper Functions --------------------
@@ -25,6 +25,7 @@ def _lara_ensdf_file_url(nuclide: str) -> str:
     """For a given nuclide identifier, returns URL for its ENSDF file on LARAWeb."""
 
     return f"{_LARA_ENSDF_FILE_BASE}/{nuclide}.txt"
+
 
 def _lara_txt_file_url(nuclide: str) -> str:
     """For a given nuclide identifier, returns URL for its LARAWeb text file."""
@@ -189,3 +190,5 @@ class LARADataFetcher:
                 future.result()
 
         print(f"\nFetched and stored raw data for {total} nuclides.\n")
+
+        return total
