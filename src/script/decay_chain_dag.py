@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+import numpy as np
 from dataclasses import dataclass
 
 
 # ----- Custom Types --------------------
 NuclideID       = tuple[str, str, int]      # (symbol, meta, mass no.)
 TransitionEdge  = tuple[NuclideID, float]   # (nuclide, branching ratio)
+
+
+# ----- Constants --------------------
+_BRANCHING_TOTAL_PCT = 100.0    # Branching ratios for a nuclide's transitions must sum to this
 
 
 # ----- Data Classes --------------------
@@ -64,6 +69,32 @@ class DecayTransition:
     branching_unc:      float | None
 
 
+# ----- Private Helpers --------------------
+def _sample_clipped_gaussian(rng: np.random.Generator, value: float, unc: float) -> float:
+    """
+    Samples a value from within its uncertainty range.
+
+    Sampled using Normal distribution.
+    Samples less than 0 clipped to 0.
+
+    Parameters
+    ----------
+    - `rng`:    Caller-owned `np.random.Generator` instance
+    - `value`:  Central value to sample around
+    - `unc`:    Standard deviation of the sample
+
+    Returns
+    -------
+    Sampled value.
+    """
+
+    if unc is None:
+        raise RuntimeError("All uncertainty values need to be set before sampling.")
+
+    sample = value + rng.normal(0.0, unc)
+    return sample if sample > 0.0 else 0.0
+
+
 # ----- Custom DAG Datastructure --------------------
 class DecayChainDAG:
     def __init__(self):
@@ -80,6 +111,102 @@ class DecayChainDAG:
         self.nuclides: dict[NuclideID, Nuclide] = {}
     
 
+    # ----- Private Methods --------------------
+    def _perturbed_nuclide_data(self, nuclide: NuclideID, rng: np.random.Generator) -> BatemanCalcData:
+        """
+        Returns perturbed data of the requested nuclide, where the perturbed values are within their 
+        uncertainty ranges.
+
+        Perturbed value sampled using Normal distribution on the allowed uncertainty range.
+
+        Parameters
+        ----------
+        - `nuclide`:    Nuclide identifier of the form `(symbol, meta, mass_number)`
+        - `rng`:        Caller-owned `np.random.Generator` instance
+
+        Returns
+        -------
+        `BatemanCalcData` instance with sampled `decay_const` and `decay_transitions`.
+        """
+
+        node = self.nuclides[nuclide]
+
+        decay_const = _sample_clipped_gaussian(rng, node.decay_const, node.decay_unc)
+        transitions = self._sample_transitions(node.decay_transitions, rng)
+
+        return BatemanCalcData(
+            nuclide             = node.nuclide,
+            decay_const         = decay_const,
+            decay_transitions   = transitions
+        )
+
+
+    def _sample_transitions(self, decay_transitions: list[DecayTransition], 
+                            rng: np.random.Generator) -> list[TransitionEdge]:
+        """
+        Returns a list sampled branching ratios (1 sample for each decay transition) where each 
+        sample lies inside the uncertainty range of their respective branching ratio.
+
+        Values sampled using Normal distribution.
+        Ensures that the sum of all the branching ratios add up to 100%.
+        
+        Workflow
+        --------
+        - Sample a branching ratio value for each decay transition.
+        - Calculate the correction factor of how much the sum of the branching ratios need to be 
+          changed to add upto 100%.
+        - Adjust each branching ratio such that their sum adds up to 100% where adjustment factor 
+          depends on the uncertainty variance of the branching ratio.
+
+        Parameters
+        ----------
+        - `decay_transitions`:  Transitions belonging to a single parent nuclide
+        - `rng`:                Caller-owned `np.random.Generator` instance
+
+        Returns
+        -------
+        List of `(daughter nuclide, sampled branching ratio)` tuples.
+        """
+
+        n = len(decay_transitions)
+
+        # If there are no decay transitions, then theres nothing to sample
+        if n == 0:
+            return []
+
+        # Generate a sample for each branching ratio
+        ratios = np.fromiter(
+            (_sample_clipped_gaussian(rng, t.branching_ratio, t.branching_unc) 
+             for t in decay_transitions),
+            dtype=np.float64, count=n
+        )
+
+        # Calculate adjustment required for branching ratio samples sum is off from 100% 
+        # (can be positive or negative)
+        correction = _BRANCHING_TOTAL_PCT - ratios.sum()
+
+        # Skip adjustment calculations if no adjustment is required (almost never the case)
+        if correction != 0.0:
+            # Calculate the uncertainty variance of each branching ratio
+            uncs         = np.fromiter((t.branching_unc for t in decay_transitions), 
+                                       dtype=np.float64, count=n)
+            weights      = uncs ** 2
+            total_weight = weights.sum()
+
+            # If the variance of all weights are 0, then split adjustments evenly across all 
+            # branching ratio samples
+            if total_weight <= 0.0:
+                weights, total_weight = np.ones(n), float(n)
+
+            # Adjust sample values based on their variance
+            ratios += correction * (weights / total_weight)
+
+        np.clip(ratios, 0.0, 100.0, out=ratios)
+
+        return [(t.nuclide, ratios[i]) for i, t in enumerate(decay_transitions)]
+
+
+    # ----- Public Methods --------------------
     def add_nuclide(self, nuclide: NuclideID, decay_const: float, decay_unc: float):
         """
         Adds a nuclide node to the decay chain.
@@ -164,3 +291,32 @@ class DecayChainDAG:
             decay_const         = self.nuclides[nuclide].decay_const,
             decay_transitions   = transitions
         )
+
+
+    def fill_missing_data(self):
+        """
+        Fills out uncertainty values for decay constants and branching ratios when they are 
+        undefined.
+
+        Convention
+        ----------
+        - Decay constant uncertainty values are set to 0.
+        - Branching ratio uncertainty values are set to the minimum branching ratio value for that 
+          nuclide.
+        """
+
+        for nuclide in self.nuclides.values():
+            # Set decay constant uncertainty if not set
+            if nuclide.decay_unc is None:
+                nuclide.decay_unc = 0.0
+            
+
+            # Set branching ratio uncertainty if not set
+            if not nuclide.decay_transitions:
+                continue
+
+            min_uncertainty = min([t.branching_ratio for t in nuclide.decay_transitions])
+            
+            for transition in nuclide.decay_transitions:
+                if transition.branching_unc is None:
+                    transition.branching_unc = min_uncertainty
