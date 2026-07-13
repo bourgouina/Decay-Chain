@@ -56,3 +56,6 @@ def build_decay_chain_graph(nuclide_filepath: Path = NUCLIDES_CSV_FILEPATH,
 
             decay_chain_graph.add_transition(parent_id, daughter_id, decay_type, branching_ratio, 
                                              branching_unc)
+            
+            # Add daughter as a stable nuclide if it doesnt already exist in the DAG
+            decay_chain_graph.add_nuclide(daughter_id, 0.0, None)
