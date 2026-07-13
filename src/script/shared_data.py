@@ -54,6 +54,7 @@ def build_decay_chain_graph(nuclide_filepath: Path = NUCLIDES_CSV_FILEPATH,
             branching_ratio         = float(row["branching_ratio"])
             branching_unc           = float(row["branching_unc"]) if row["branching_unc"] else None
 
+            # Add decay transition of parent
             decay_chain_graph.add_transition(parent_id, daughter_id, decay_type, branching_ratio, 
                                              branching_unc)
             

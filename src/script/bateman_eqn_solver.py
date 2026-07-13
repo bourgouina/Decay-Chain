@@ -43,6 +43,9 @@ class BatemanEqnSolver:
         self._dag                               = dag
         self._root                              = root
         self._cache: dict[Path, BatemanState]   = {}
+
+        # Stores all paths which start at the root and terminate at a stable nuclide
+        self._final_paths: list[Path]           = []
         
         # Computes and caches Bateman sub-expressions for different states
         self._compute_bateman_states()
@@ -81,6 +84,12 @@ class BatemanEqnSolver:
             current, path = queue.popleft()
             current_data = self._dag.read_nuclide_data(current)
             parent_state  = self._cache[path]   # Extract parent paths cached sub-expressions
+
+            # If current nuclide does not have any decay transitions from it, then it is stable
+            # Log it and move on to next nuclide in queue
+            if not current_data.decay_transitions:
+                self._final_paths.append(path)
+                continue
 
             # For each new possible path calculate and cache their sub-expressions
             for daughter, prob in current_data.decay_transitions:
@@ -196,3 +205,9 @@ class BatemanEqnSolver:
         N_nuclides = N_paths @ self._grouping_matrix.T
 
         return {nuclide: N_nuclides[:, v] for v, nuclide in enumerate(self._nuclides)}
+    
+
+    def get_final_paths(self) -> list[Path]:
+        """Returns the list of paths which start from the root and end at a stable nuclide."""
+
+        return self._final_paths
