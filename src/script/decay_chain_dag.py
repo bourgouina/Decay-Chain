@@ -10,7 +10,8 @@ TransitionEdge  = tuple[NuclideID, float]   # (nuclide, branching ratio)
 
 
 # ----- Constants --------------------
-_BRANCHING_TOTAL_PCT = 100.0    # Branching ratios for a nuclide's transitions must sum to this
+_BRANCHING_TOTAL_PCT  = 100.0
+_CONVERGENCE_TOL_PCT  = 1e-9     # Correction below this threshold is treated as "already summed to 100%"
 
 
 # ----- Data Classes --------------------
@@ -70,12 +71,12 @@ class DecayTransition:
 
 
 # ----- Private Helpers --------------------
-def _sample_clipped_gaussian(rng: np.random.Generator, value: float, unc: float) -> float:
+def _perturb_decay_const(rng: np.random.Generator, value: float, unc: float) -> float:
     """
-    Samples a value from within its uncertainty range.
+    Returns a perturbed decay constant value from within its uncertainty range.
 
     Sampled using Normal distribution.
-    Samples less than 0 clipped to 0.
+    If sample is less than 0 it is clipped to 0.
 
     Parameters
     ----------
@@ -92,7 +93,107 @@ def _sample_clipped_gaussian(rng: np.random.Generator, value: float, unc: float)
         raise RuntimeError("All uncertainty values need to be set before sampling.")
 
     sample = value + rng.normal(0.0, unc)
-    return sample if sample > 0.0 else 0.0
+    return max(0.0, sample)
+
+
+def _perturb_branching_ratio(rng: np.random.Generator, value: float, unc: float) -> float:
+    """
+    Returns a perturbed branching ratio value from within its uncertainty range.
+
+    Sampled using Normal distribution.
+    Sample value is clamped between 0-100 range (inclusive).
+
+    Parameters
+    ----------
+    - `rng`:    Caller-owned `np.random.Generator` instance
+    - `value`:  Central value to sample around
+    - `unc`:    Standard deviation of the sample
+
+    Returns
+    -------
+    Sampled value.
+    """
+
+    if unc is None:
+        raise RuntimeError("All uncertainty values need to be set before sampling.")
+
+    sample = value + rng.normal(0.0, unc)
+    return min(100.0, max(0.0, sample))
+
+
+def _redistribute_to_total(ratios: np.ndarray, uncs: np.ndarray) -> np.ndarray:
+    """
+    Adjusts perturbed branching ratio values so that they add up to 100% while each of them still 
+    lying in the 0-100 range.
+
+    Adjustments are weighted using the uncertainty variance of each branching ratio.
+
+    Workflow
+    --------
+    - Compute the correction needed for the active (not yet frozen) values so that the sum of all 
+      the values (including frozen) sum to 100%.
+    - If all computed values lie in the 0-100 range (inclusive) or if all values are frozen, then 
+      all values are valid and redistribution is complete.
+    - If some computer values are not in the inclusive 0-100 range, clamp them within that range and 
+      freeze them (i.e. they are not altered in future iterations).
+    - Repeat till all values are valid.
+
+    Note
+    ----
+    The redistribution terminates withing `n` iterations where `n` is the no. of branching ratios 
+    as each pass freezes at least one value.
+
+    Parameters
+    ----------
+    - `ratios`: Sampled values, already individually clipped to `[0, 100]`
+    - `uncs`:   Uncertainty (std dev) of each value, same order/length as `ratios`
+
+    Returns
+    -------
+    Numpy array of adjusted branching ratios.
+    """
+
+    n      = len(ratios)
+    ratios = ratios.copy()
+    active = np.ones(n, dtype=bool)
+
+    for _ in range(n):
+        correction = _BRANCHING_TOTAL_PCT - ratios.sum()
+
+        # If correction value is less than threshold, it can be treated as 0
+        # So no more redistribution required
+        if abs(correction) < _CONVERGENCE_TOL_PCT:
+            break
+
+        # If every value is frozen at a boundary, then there is no room left for redistribution
+        if not active.any():
+            break
+
+        weights      = uncs[active] ** 2
+        total_weight = weights.sum()
+
+        # If all active weights are zero, then split remaining redistribution evenly
+        if total_weight <= 0.0:
+            weights, total_weight = np.ones(active.sum()), float(active.sum())
+
+        proposed: np.ndarray    = ratios[active] + correction * (weights / total_weight)
+        violates                = (proposed < 0.0) | (proposed > _BRANCHING_TOTAL_PCT)
+
+        active_idx = np.flatnonzero(active)
+
+        # If all of the proposed branching ratios lie within the 0-100 range, then no 
+        # redistribution needed
+        if not violates.any():
+            ratios[active_idx] = proposed
+            break
+
+        # Clip values which are outside the inclusive 0-100 range and freeze them
+        # Provisionally apply the rest of the altered values
+        ratios[active_idx[violates]]  = np.clip(proposed[violates], 0.0, _BRANCHING_TOTAL_PCT)
+        ratios[active_idx[~violates]] = proposed[~violates]
+        active[active_idx[violates]]  = False
+
+    return ratios
 
 
 # ----- Custom DAG Datastructure --------------------
@@ -131,7 +232,7 @@ class DecayChainDAG:
 
         node = self.nuclides[nuclide]
 
-        decay_const = _sample_clipped_gaussian(rng, node.decay_const, node.decay_unc)
+        decay_const = _perturb_decay_const(rng, node.decay_const, node.decay_unc)
         transitions = self._sample_transitions(node.decay_transitions, rng)
 
         return BatemanCalcData(
@@ -148,15 +249,14 @@ class DecayChainDAG:
         sample lies inside the uncertainty range of their respective branching ratio.
 
         Values sampled using Normal distribution.
-        Ensures that the sum of all the branching ratios add up to 100%.
+        Ensures that the sum of all the branching ratios add up to 100% while each branching ratio 
+        remains within the 0-100 range (inclusive).
         
         Workflow
         --------
         - Sample a branching ratio value for each decay transition.
-        - Calculate the correction factor of how much the sum of the branching ratios need to be 
-          changed to add upto 100%.
-        - Adjust each branching ratio such that their sum adds up to 100% where adjustment factor 
-          depends on the uncertainty variance of the branching ratio.
+        - Adjust sample values such that their sum adds up to 100% while each of them lie within 
+          the 0-100 range.
 
         Parameters
         ----------
@@ -176,32 +276,15 @@ class DecayChainDAG:
 
         # Generate a sample for each branching ratio
         ratios = np.fromiter(
-            (_sample_clipped_gaussian(rng, t.branching_ratio, t.branching_unc) 
+            (_perturb_branching_ratio(rng, t.branching_ratio, t.branching_unc) 
              for t in decay_transitions),
             dtype=np.float64, count=n
         )
 
-        # Calculate adjustment required for branching ratio samples sum is off from 100% 
-        # (can be positive or negative)
-        correction = _BRANCHING_TOTAL_PCT - ratios.sum()
+        uncs = np.fromiter((t.branching_unc for t in decay_transitions), 
+                           dtype=np.float64, count=n)
 
-        # Skip adjustment calculations if no adjustment is required (almost never the case)
-        if correction != 0.0:
-            # Calculate the uncertainty variance of each branching ratio
-            uncs         = np.fromiter((t.branching_unc for t in decay_transitions), 
-                                       dtype=np.float64, count=n)
-            weights      = uncs ** 2
-            total_weight = weights.sum()
-
-            # If the variance of all weights are 0, then split adjustments evenly across all 
-            # branching ratio samples
-            if total_weight <= 0.0:
-                weights, total_weight = np.ones(n), float(n)
-
-            # Adjust sample values based on their variance
-            ratios += correction * (weights / total_weight)
-
-        np.clip(ratios, 0.0, 100.0, out=ratios)
+        ratios = _redistribute_to_total(ratios, uncs)
 
         return [(t.nuclide, ratios[i]) for i, t in enumerate(decay_transitions)]
 
