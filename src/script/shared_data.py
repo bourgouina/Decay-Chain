@@ -60,3 +60,6 @@ def build_decay_chain_graph(nuclide_filepath: Path = NUCLIDES_CSV_FILEPATH,
             
             # Add daughter as a stable nuclide if it doesnt already exist in the DAG
             decay_chain_graph.add_nuclide(daughter_id, 0.0, None)
+    
+    # Fill in missing uncertainty values
+    decay_chain_graph.fill_missing_data()
