@@ -237,3 +237,16 @@ class BatemanEqnSolver:
         """Returns the list of paths which start from the root and end at a stable nuclide."""
 
         return self._final_paths
+    
+
+    def read_nuclide_data(self, nuclide: NuclideID) -> BatemanCalcData:
+        """
+        Returns requested nuclide data (maybe perturbed) used in current `BatemanEqnSolver` instance for 
+        calculations.
+
+        Parameter
+        ---------
+        - `nuclide`: Nuclide identifier of the form `(symbol, meta, mass_number)`
+        """
+
+        return self._nuclide_cache[nuclide]
