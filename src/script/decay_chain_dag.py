@@ -362,7 +362,7 @@ class DecayChainDAG:
  
         Parameters
         ----------
-        - `nuclide`: Unique identifier as `(symbol, meta, mass_number)`
+        - `nuclide`: Nuclide identifier as `(symbol, meta, mass_number)`
         - `rng`:     Caller-owned `np.random.Generator` instance, or `None` for unperturbed data
  
         Returns
