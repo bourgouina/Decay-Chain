@@ -353,6 +353,9 @@ class DecayChainDAG:
         """
         Returns a copy of the `Nuclide` data for the requested nuclide required for Bateman 
         equation calculations.
+
+        If `rng` is `None`, returns a copy of the nuclide's stored (unperturbed) data. 
+        If `rng` is provided, returns freshly perturbed data — computed fresh on every call.
  
         Returns a copy rather than a direct reference to protect graph integrity when the DAG
         is shared across multiple solvers and threads.
@@ -360,7 +363,7 @@ class DecayChainDAG:
         Parameters
         ----------
         - `nuclide`: Unique identifier as `(symbol, meta, mass_number)`
-        - `rng`:     
+        - `rng`:     Caller-owned `np.random.Generator` instance, or `None` for unperturbed data
  
         Returns
         -------

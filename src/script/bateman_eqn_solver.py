@@ -36,8 +36,10 @@ class BatemanEqnSolver:
  
         Parameters
         ----------
-        - `dag`:   Fully built decay chain DAG, shared across all solver instances
-        - `root`:  Root nuclide to solve from
+        - `dag`:    Fully built decay chain DAG, shared across all solver instances
+        - `root`:   Root nuclide to solve from
+        - `rng`:    Caller-owned `np.random.Generator` instance used to perturb nuclide data for 
+                    Monte Carlo trials. `None` for a deterministic (unperturbed) solve.
         """
 
         self._dag   = dag
@@ -49,7 +51,7 @@ class BatemanEqnSolver:
         self._nuclide_cache: dict[NuclideID, BatemanCalcData]   = {}
 
         # Stores all paths which start at the root and terminate at a stable nuclide
-        self._final_paths: list[Path]           = []
+        self._final_paths: list[Path] = []
         
         # Computes and caches Bateman sub-expressions for different states
         self._compute_bateman_states()
@@ -68,6 +70,10 @@ class BatemanEqnSolver:
  
         BFS guarantees that when extending a path to depth n, the parent path state at depth n-1
         is already cached.
+
+        Each nuclide's `BatemanCalcData` is fetched from the DAG at most once and stored in a cache. 
+        This guarantees a single consistent sampled `decay_const`/`decay_transitions` per nuclide within a 
+        solve, which is required for correctness under Monte Carlo perturbation.
         """
 
         # Queue also stores path taken along with next nuclide in order to use it as a key to 
