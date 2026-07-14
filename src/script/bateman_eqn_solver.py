@@ -4,7 +4,7 @@ import numpy as np
 from collections import deque
 from dataclasses import dataclass
 
-from decay_chain_dag import DecayChainDAG, NuclideID
+from decay_chain_dag import DecayChainDAG, NuclideID, BatemanCalcData
 
 
 # ----- Custom Types --------------------
@@ -25,7 +25,7 @@ class BatemanState:
 
 # ----- Bateman Solver --------------------
 class BatemanEqnSolver:
-    def __init__(self, dag: DecayChainDAG, root: NuclideID):
+    def __init__(self, dag: DecayChainDAG, root: NuclideID, rng: np.random.Generator | None):
         """
         Solves the Bateman equation for all nuclides reachable from `root` in the DAG.
  
@@ -40,9 +40,13 @@ class BatemanEqnSolver:
         - `root`:  Root nuclide to solve from
         """
 
-        self._dag                               = dag
-        self._root                              = root
-        self._cache: dict[Path, BatemanState]   = {}
+        self._dag   = dag
+        self._root  = root
+        self._rng   = rng
+
+        # Value caches
+        self._path_cache: dict[Path, BatemanState]              = {}
+        self._nuclide_cache: dict[NuclideID, BatemanCalcData]   = {}
 
         # Stores all paths which start at the root and terminate at a stable nuclide
         self._final_paths: list[Path]           = []
@@ -71,10 +75,11 @@ class BatemanEqnSolver:
         queue: deque[tuple[NuclideID, tuple[NuclideID, ...]]] = deque()
         queue.append((self._root, (self._root,)))
 
-        root_lambda = self._dag.read_nuclide_data(self._root).decay_const
+        self._nuclide_cache[self._root] = self._dag.read_nuclide_data(self._root, self._rng)
+        root_lambda = self._nuclide_cache[self._root].decay_const
 
         # Cache root's trivial sub-expressions (n=1)
-        self._cache[(self._root,)] = BatemanState(
+        self._path_cache[(self._root,)] = BatemanState(
             kk      = 1.0,
             coeffs  = np.array([1.0]),
             lambdas = np.array([root_lambda])
@@ -82,8 +87,15 @@ class BatemanEqnSolver:
 
         while queue:
             current, path = queue.popleft()
-            current_data = self._dag.read_nuclide_data(current)
-            parent_state  = self._cache[path]   # Extract parent paths cached sub-expressions
+
+            # If nuclide data already in cache, use it, else fetch data from DAG and cache it
+            if current in self._nuclide_cache:
+                current_data = self._nuclide_cache[current]
+            else:
+                current_data = self._dag.read_nuclide_data(current, self._rng)
+                self._nuclide_cache[current] = current_data
+            
+            parent_state = self._path_cache[path]   # Extract parent paths cached sub-expressions
 
             # If current nuclide does not have any decay transitions from it, then it is stable
             # Log it and move on to next nuclide in queue
@@ -94,7 +106,15 @@ class BatemanEqnSolver:
             # For each new possible path calculate and cache their sub-expressions
             for daughter, prob in current_data.decay_transitions:
                 new_path = path + (daughter,)
-                daughter_lambda = self._dag.read_nuclide_data(daughter).decay_const
+
+                # If nuclide data is already in cache, use it, else fetch data from DAG and cache it
+                if daughter in self._nuclide_cache:
+                    daughter_data = self._nuclide_cache[daughter]
+                else:
+                    daughter_data = self._dag.read_nuclide_data(daughter, self._rng)
+                    self._nuclide_cache[daughter] = daughter_data
+                
+                daughter_lambda = daughter_data.decay_const
 
                 new_kk      = parent_state.kk * \
                     (current_data.decay_const * prob / 100.0)
@@ -105,7 +125,7 @@ class BatemanEqnSolver:
                 new_coeffs[:-1]  = parent_state.coeffs / diffs
                 new_coeffs[-1]   = 1.0 / np.prod(-diffs)
 
-                self._cache[new_path] = BatemanState(
+                self._path_cache[new_path] = BatemanState(
                     kk      = new_kk,
                     coeffs  = new_coeffs,
                     lambdas = new_lambdas
@@ -138,7 +158,7 @@ class BatemanEqnSolver:
         - `grouping_matrix`: shape (V, P)      — binary path-to-nuclide assignment matrix
         """
 
-        paths    = list(self._cache.keys())
+        paths    = list(self._path_cache.keys())
         P        = len(paths)
         d_max    = max(len(p) for p in paths)
 
@@ -162,7 +182,7 @@ class BatemanEqnSolver:
         grouping_matrix  = np.zeros((V, P))
 
         for i, path in enumerate(paths):
-            state = self._cache[path]
+            state = self._path_cache[path]
             d     = len(state.lambdas)
 
             all_kk[i]                           = state.kk

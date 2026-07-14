@@ -349,7 +349,7 @@ class DecayChainDAG:
         ))
 
 
-    def read_nuclide_data(self, nuclide: NuclideID) -> BatemanCalcData:
+    def read_nuclide_data(self, nuclide: NuclideID, rng: np.random.Generator | None) -> BatemanCalcData:
         """
         Returns a copy of the `Nuclide` data for the requested nuclide required for Bateman 
         equation calculations.
@@ -360,11 +360,16 @@ class DecayChainDAG:
         Parameters
         ----------
         - `nuclide`: Unique identifier as `(symbol, meta, mass_number)`
+        - `rng`:     
  
         Returns
         -------
         `BatemanCalData` instance.
         """
+
+        if rng is not None:
+            return self._perturbed_nuclide_data(nuclide, rng)
+        
 
         transitions = [(t.nuclide, t.branching_ratio) 
                        for t in self.nuclides[nuclide].decay_transitions]
