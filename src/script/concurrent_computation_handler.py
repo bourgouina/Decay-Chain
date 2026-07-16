@@ -46,15 +46,19 @@ class ConcurrentComputationHandler:
 
         Parameters
         ----------
-        - `dag`:     Fully built decay chain DAG, shared across all root computations
-        - `trials`:  Number of MC trials to run per root. `1` runs a single deterministic
-                     (unperturbed) solve per root, and no `Generator` is constructed.
-        - `seed`:    Test-mode determinism switch. When set, every root's `Generator` is
-                     constructed from the same seed, so perturbations are identical across all roots 
-                     and across repeated calls — intended for reproducible testing, not statistically 
-                     independent MC sampling. 
-                     `None` (default) gives each root's `Generator` independent OS-entropy seeding,
-                     appropriate for production MC runs.
+        - `dag`:    Fully built decay chain DAG, shared across all root computations
+
+        - `trials`: Number of MC trials to run per root. `1` runs a single deterministic
+                    (unperturbed) solve per root, and no `Generator` is constructed.
+
+        - `seed`:   Test-mode determinism switch. 
+                    When set, every root constructs its `SeedSequence` from the same seed, and 
+                    trial `i`'s `Generator` is always spawned from child index `i` of that sequence 
+                    (i.e. trial `i` draws the same perturbations regardless of root). This is
+                    intended for reproducible testing, not statistically independent MC sampling.
+                    `None` (default) gives each root's `SeedSequence` independent OS-entropy
+                    seeding, so spawned trial generators are independent across both roots and
+                    trials — appropriate for production MC runs.
         """
 
         # Gaurd against negative trial count
@@ -72,15 +76,19 @@ class ConcurrentComputationHandler:
         """
         Runs all trials for a single root nuclide and stores the results.
 
-        Constructs one `Generator` (or `None`, if `trials == 1`) and reuses it sequentially
-        across every trial for this root, so trials draw independent perturbations from a
-        single continuous stream rather than reseeding per trial.
+        Builds one `SeedSequence` for this root (or skips it, if `trials == 1`) and spawns
+        `trials` independent child sequences from it up front, before any trial thread is
+        submitted. Each trial thread then constructs its own `Generator` from its child
+        sequence, so trials never share a mutable `Generator` object — each trial's draws
+        are isolated from every other concurrently running trial for this root.
 
         Workflow
         --------
-        - Construct `rng` once for this root (or `None` for a deterministic solve)
-        - For each trial: build a fresh `BatemanEqnSolver`, evaluate atom counts, derive
-          activity values from the solver's own cached trial data, and append the result
+        - Spawn `trials` child `SeedSequence`s for this root (skipped if `trials == 1`).
+        - For each trial: construct that trial's own `Generator` from its child sequence
+          (or `None` for a deterministic solve), build a fresh `BatemanEqnSolver`, evaluate
+          atom counts, derive activity values from the solver's own cached trial data, and
+          store the result in this trial's pre-assigned slot.
 
         Parameters
         ----------
@@ -92,7 +100,9 @@ class ConcurrentComputationHandler:
         # Each trial has a pre-assigned slot in the list which depends on its trial number
         self._compute_vals[(root, N0)] = [None] * self._trials
 
-        # Set random value generator seed sequences if no. of trials is greater than 1
+        # If no. of trials is greater than 1, spawn one independent child SeedSequence per trial, 
+        # up front, so each trial's Generator is constructed from its own child rather than a shared 
+        # object
         child_seqs = None
 
         if self._trials > 1:
@@ -100,6 +110,7 @@ class ConcurrentComputationHandler:
                 else np.random.SeedSequence(self._seed)
             child_seqs  = seed_seq.spawn(self._trials)
 
+        # Calculates the Bateman equation for each trial in parallel
         with ThreadPoolExecutor(max_workers=THREAD_COUNT) as executor:
             futures = [executor.submit(self._compute_one_trial, i, 
                                        np.random.default_rng(child_seqs[i]) if self._trials > 1 else None, 
@@ -113,6 +124,17 @@ class ConcurrentComputationHandler:
     def _compute_one_trial(self, i: int, rng: np.random.Generator | None, root: NuclideID, N0: int, 
                            timestamps: npt.NDArray[np.float64]):
         """
+        Runs a single Bateman equation solve (one trial) for one root nuclide and stores
+        the result in this trial's pre-assigned slot.
+
+        Parameters
+        ----------
+        - `i`:           Trial index; determines this trial's slot in the results list
+        - `rng`:         This trial's own `Generator` for MC perturbation, or `None` for
+                         a deterministic (unperturbed) solve
+        - `root`:        Root nuclide to solve from
+        - `N0`:          Initial atom count of `root`
+        - `timestamps`:  1D array of time points (in seconds) to evaluate at
         """
 
         bateman_solver  = BatemanEqnSolver(self._dag, root, rng)
@@ -146,6 +168,7 @@ class ConcurrentComputationHandler:
         Dict mapping `(root nuclide, N0)` to a list of `TrialResult`, one entry per trial.
         """
 
+        # Does Monte-Carlo simulations for each root in parallel
         with ThreadPoolExecutor(max_workers=THREAD_COUNT) as executor:
             futures = [executor.submit(self._compute_one_root, root, N0, timestamps)
                        for root, N0 in roots]
