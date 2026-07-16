@@ -25,40 +25,47 @@ class BatemanState:
 
 # ----- Bateman Solver --------------------
 class BatemanEqnSolver:
-    def __init__(self, dag: DecayChainDAG, root: NuclideID, rng: np.random.Generator | None):
+    def __init__(self, dag: DecayChainDAG, root: NuclideID, N0: float, t: np.ndarray,
+                 rng: np.random.Generator | None):
         """
         Solves the Bateman equation for all nuclides reachable from `root` in the DAG.
  
         On initialization:
-        1. Runs BFS from `root` to compute and cache `BatemanState` for every root-to-node path
-        2. Packs cached states into padded batch arrays and a grouping matrix for vectorized
-           evaluation
+        1. Runs BFS from `root` to compute and cache `BatemanState` for every root-to-node path.
+        2. Evaluates and stores `N(t)` and `A(t)` as numpy matrices for the given starting atom 
+           count and timestamps.
  
         Parameters
         ----------
         - `dag`:    Fully built decay chain DAG, shared across all solver instances
         - `root`:   Root nuclide to solve from
+        - `N0`:     Initial atom count of root nuclide
+        - `t`:      1D numpy array of timestamps (in seconds)
         - `rng`:    Caller-owned `np.random.Generator` instance used to perturb nuclide data for 
                     Monte Carlo trials. `None` for a deterministic (unperturbed) solve.
         """
 
         self._dag   = dag
         self._root  = root
+        self._N0    = N0
+        self._t     = t
         self._rng   = rng
 
         # Value caches
         self._path_cache: dict[Path, BatemanState]              = {}
         self._nuclide_cache: dict[NuclideID, BatemanCalcData]   = {}
 
-        # Stores all paths which start at the root and terminate at a stable nuclide
+        # To store all paths which start at the root and terminate at a stable nuclide
         self._final_paths: list[Path] = []
         
         # Computes and caches Bateman sub-expressions for different states
         self._compute_bateman_states()
 
-        # Build padded batch arrays and grouping matrix from cache for vectorized evaluation
-        self._all_kk, self._all_coeffs, self._all_lambdas, self._nuclides, \
-            self._grouping_matrix = self._build_batch_arrays()
+        # Evaluate N(t) for each nuclide for each timestamp
+        self._N_nuclides, self._lambda_vec, self._nuclides = self._build_batch_arrays()
+
+        # Evaluate A(t) for each nuclide for each timestamp
+        self._A_nuclides = self._N_nuclides * self._lambda_vec[np.newaxis, :]
 
 
     # ----- Private Methods --------------------
@@ -140,10 +147,10 @@ class BatemanEqnSolver:
                 queue.append((daughter, new_path))
 
 
-    def _build_batch_arrays(self) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[NuclideID], np.ndarray]:
+    def _build_batch_arrays(self) -> tuple[np.ndarray, np.ndarray, list[NuclideID]]:
         """
         Packs cached `BatemanState`s for this root into padded 2D arrays and a grouping matrix,
-        precomputed once at init.
+        and then evaluates `N(t)` for the timestamps and the root's initial atom count.
  
         Shorter paths are padded to `d_max`:
         - `coeffs`  padded with 0.0 — padded terms contribute nothing to the Bateman sum
@@ -155,31 +162,25 @@ class BatemanEqnSolver:
         - Allows for grouping of `N(t)` results by terminal nuclide through a single matrix 
           multiplication operation
  
+        N(t) evaluation steps, once arrays are built:
+        1. `exp_terms (T, P, d_max)` — one exponential per timestamp, path, and depth position
+        2. `N_paths (T, P)`          — Bateman sum contracted over `d_max`, scaled by `kk` and `N0`
+        3. `N_nuclides (T, V)`       — contributions grouped by terminal nuclide via matrix multiplication
+ 
         Returns
         -------
-        - `all_kk`:          shape (P,)        — kk scalar per path
-        - `all_coeffs`:      shape (P, d_max)  — padded coefficients per path
-        - `all_lambdas`:     shape (P, d_max)  — padded decay constants per path
-        - `nuclides`:        list of V unique terminal nuclides, ordered by first appearance
-        - `grouping_matrix`: shape (V, P)      — binary path-to-nuclide assignment matrix
+        - `N_nuclides`: shape (T, V) — `N(t)` per terminal nuclide, grouped, for this instance's `N0`/`t`
+        - `lambda_vec`: shape (V,)   — decay constant per terminal nuclide, aligned to `nuclides` order
+        - `nuclides`:   list of V unique terminal nuclides, ordered by first appearance
         """
 
         paths    = list(self._path_cache.keys())
         P        = len(paths)
         d_max    = max(len(p) for p in paths)
 
-        # Stores unique terminal nuclides in order of first appearance with iteration through 
-        # paths
-        seen = {}
-
-        for path in paths:
-            t = path[-1]
-
-            if t not in seen:
-                seen[t] = len(seen)
-        
-        nuclides:list[NuclideID]    = list(seen.keys())
-        V                           = len(nuclides)
+        nuclides: list[NuclideID] = list(self._nuclide_cache)
+        V             = len(nuclides)
+        nuclide_index = {nuclide: i for i, nuclide in enumerate(nuclides)}
 
         # Create batch arrays
         all_kk           = np.empty(P)
@@ -191,62 +192,52 @@ class BatemanEqnSolver:
             state = self._path_cache[path]
             d     = len(state.lambdas)
 
-            all_kk[i]                           = state.kk
-            all_coeffs[i, :d]                   = state.coeffs
-            all_lambdas[i, :d]                  = state.lambdas
-            grouping_matrix[seen[path[-1]], i]  = 1.0
+            all_kk[i]                                   = state.kk
+            all_coeffs[i, :d]                           = state.coeffs
+            all_lambdas[i, :d]                          = state.lambdas
+            grouping_matrix[nuclide_index[path[-1]], i] = 1.0
 
-        return all_kk, all_coeffs, all_lambdas, nuclides, grouping_matrix
+        # Array containing decay constants in same order as nuclides list
+        lambda_vec = np.array([self._nuclide_cache[n].decay_const for n in nuclides])
+
+        # Calculate exp terms
+        exp_terms = np.exp(-all_lambdas[np.newaxis, :, :] * self._t[:, np.newaxis, np.newaxis])
+
+        # Sum over d_max
+        N_paths = self._N0 * all_kk[np.newaxis, :] * \
+            (exp_terms * all_coeffs[np.newaxis, :, :]).sum(axis=-1)
+
+        # Group by terminal nuclide via matrix multiplication
+        N_nuclides = N_paths @ grouping_matrix.T
+
+        return (N_nuclides, lambda_vec, nuclides)
 
 
     # ----- Public Methods --------------------
-    def evaluate_all(self, N0: float, t: np.ndarray) -> dict[NuclideID, np.ndarray]:
+    def get_atom_count_matrix(self) -> np.ndarray:
         """
-        Returns `N(t)` for every nuclide reachable from `root`, summed across all paths that
-        terminate at that nuclide.
- 
-        Evaluation steps:
-        1. `exp_terms (T, P, d_max)` — one exponential per time point, path, and depth position
-        2. `N_paths (T, P)`          — Bateman sum contracted over d_max, scaled by kk and N0
-        3. `N_nuclides (T, V)`       — contributions grouped by terminal nuclide via matrix multiplication
- 
-        Parameters
-        ----------
-        `N0`: Initial atom count of root nuclide
-        `t`:  1D numpy array of time points (in seconds)
- 
-        Returns
-        -------
-        dict mapping `NuclideID` -> 1D atom count array of shape `(len(t),)`
         """
 
-        # Calculate exp terms
-        exp_terms = np.exp(-self._all_lambdas[np.newaxis, :, :] * t[:, np.newaxis, np.newaxis])
-
-        # Sum over d_max
-        N_paths = N0 * self._all_kk[np.newaxis, :] * \
-            (exp_terms * self._all_coeffs[np.newaxis, :, :]).sum(axis=-1)
-
-        # Group by terminal nuclide via matrix multiplication
-        N_nuclides = N_paths @ self._grouping_matrix.T
-
-        return {nuclide: N_nuclides[:, v] for v, nuclide in enumerate(self._nuclides)}
+        return self._N_nuclides
     
 
-    def get_final_paths(self) -> list[Path]:
-        """Returns the list of paths which start from the root and end at a stable nuclide."""
+    def get_activity_matrix(self) -> np.ndarray:
+        """
+        """
 
-        return self._final_paths
+        return self._A_nuclides
+    
+    def get_nuclides_list(self) -> list[NuclideID]:
+        """
+        """
+
+        return self._nuclides
     
 
-    def read_nuclide_data(self, nuclide: NuclideID) -> BatemanCalcData:
+    @staticmethod
+    def create_nuclide_map(matrix: np.ndarray, 
+                           nuclides: list[NuclideID]) -> dict[NuclideID, np.ndarray]:
         """
-        Returns requested nuclide data (maybe perturbed) used in current `BatemanEqnSolver` instance for 
-        calculations.
-
-        Parameter
-        ---------
-        - `nuclide`: Nuclide identifier of the form `(symbol, meta, mass_number)`
         """
 
-        return self._nuclide_cache[nuclide]
+        return {nuclide: matrix[:, v] for v, nuclide in enumerate(nuclides)}
