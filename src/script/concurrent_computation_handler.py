@@ -27,9 +27,9 @@ class TrialResult:
                             equation calculations.
     """
 
-    atom_count_vals:    Map
-    activity_vals:      Map
-    trial_data:         dict[NuclideID, BatemanCalcData]    # Currently always None as data storage not in scope
+    atom_count_vals:    np.ndarray
+    activity_vals:      np.ndarray
+    nuclides:           list[NuclideID]
 
 
 # ----- Constants --------------------
@@ -137,18 +137,12 @@ class ConcurrentComputationHandler:
         - `timestamps`:  1D array of time points (in seconds) to evaluate at
         """
 
-        bateman_solver  = BatemanEqnSolver(self._dag, root, rng)
-        atom_count_vals = bateman_solver.evaluate_all(N0, timestamps)
-
-        activity_vals: Map = {
-            nuclide: bateman_solver.read_nuclide_data(nuclide).decay_const * values
-            for nuclide, values in atom_count_vals.items()
-        }
+        bateman_solver  = BatemanEqnSolver(self._dag, root, N0, timestamps, rng)
                     
         self._compute_vals[(root, N0)][i] = TrialResult(
-            atom_count_vals = atom_count_vals,
-            activity_vals   = activity_vals,
-            trial_data      = None
+            atom_count_vals = bateman_solver.get_atom_count_matrix(),
+            activity_vals   = bateman_solver.get_activity_matrix(),
+            nuclides        = bateman_solver.get_nuclides_list()
         )
     
 
