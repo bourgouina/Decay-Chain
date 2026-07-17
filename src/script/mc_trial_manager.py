@@ -11,31 +11,11 @@ from bateman_eqn_solver import BatemanEqnSolver
 Map = dict[NuclideID, npt.NDArray[np.float64]]
 
 
+# ----- Constants --------------------
+_MC_WORKER_COUNT = 20
+
+
 # ----- Data Classes --------------------
-@dataclass
-class TrialResult:
-    """
-    Stores the results of a single Bateman equation solve (one trial) for one root nuclide.
-
-    `atom_count_vals` and `activity_vals` are raw `(T, V)` matrices. 
-
-    Column `v` of either matrix corresponds to `nuclides[v]`.
-
-    Use `BatemanEqnSolver.create_nuclide_map()` to convert a matrix to a `{nuclide: array}` dict if 
-    needed.
-
-    Attributes
-    ----------
-    - `atom_count_vals`: `N(t)` atom count numpy matrix, shape `(T, V)`
-    - `activity_vals`:   `A(t)` activity numpy matrix, shape `(T, V)`
-    - `nuclides`:        List of `V` reachable nuclides, ordered to match both matrices' columns
-    """
-
-    atom_count_vals:    np.ndarray
-    activity_vals:      np.ndarray
-    nuclides:           list[NuclideID]
-
-
 @dataclass
 class RootResult:
     """
@@ -53,36 +33,59 @@ class RootResult:
     non_perturbed_activity: Map
 
 
-# ----- Constants --------------------
-_MC_WORKER_COUNT = 20
+@dataclass
+class _WelfordAccumulator:
+    """
+    Running `(count, mean, M2)` for Welford's online variance algorithm, tracked as `(T, V)` arrays
+    so every update is one vectorized step across all nuclides/timestamps at once.
+    """
+
+    count: int
+    mean:  np.ndarray   # (T, V)
+    M2:    np.ndarray   # (T, V), sum of squared deviations from the running mean
 
 
 # ----- Helper Methods --------------------
-def _calc_activity_std(results: list[TrialResult]) -> np.ndarray:
+def _welford_update(acc: _WelfordAccumulator, activity: np.ndarray) -> None:
     """
-    Computes standard deviation of activity per nuclide per timestamp across trials.
-
-    Raises `RuntimeError` if every trial's `nuclides` list does not match positionally as it means 
-    that the ordering of the rows is not uniform and the calculated standard deviation value will 
-    be incorrect.
+    Folds one new `(T, V)` activity sample into `acc`, in place, using Welford's online formula.
 
     Parameters
     ----------
-    - `results`: List of `TrialResult`s (one per trial)
+    - `acc`:        Accumulator to update in place
+    - `activity`:   This trial's `(T, V)` activity matrix
+    """
+
+    acc.count  += 1
+    delta       = activity - acc.mean
+    acc.mean   += delta / acc.count
+    delta2      = activity - acc.mean
+    acc.M2     += delta * delta2
+
+
+def _welford_merge(a: _WelfordAccumulator, b: _WelfordAccumulator) -> _WelfordAccumulator:
+    """
+    Combines two independent Welford accumulators (from two different worker threads, each
+    having accumulated a disjoint batch of trials) into one, via Chan et al.'s parallel variance
+    combination formula. 
+    
+    Neither input is mutated.
+
+    Parameters
+    ----------
+    - `a`, `b`: Independent accumulators over disjoint trial batches
 
     Returns
     -------
-    Numpy array of shape `(T, V)` — standard deviation of activity per timestamp, per nuclide; 
-    `ddof=1` since trials are a finite sample estimating the true MC variance, not a full population.
+    A new `_WelfordAccumulator` equivalent to having accumulated both batches' trials in sequence.
     """
 
-    nuclides = results[0].nuclides
-    if not all(r.nuclides == nuclides for r in results):
-        raise RuntimeError("Nuclide ordering diverged across trials — unsafe to stack columns directly")
+    count = a.count + b.count
+    delta = b.mean - a.mean
+    mean  = a.mean + delta * (b.count / count)
+    M2    = a.M2 + b.M2 + delta**2 * (a.count * b.count / count)
 
-    stacked = np.stack([r.activity_vals for r in results], axis=0)   # (trials, T, V)
-
-    return stacked.std(axis=0, ddof=1)
+    return _WelfordAccumulator(count=count, mean=mean, M2=M2)
 
 
 class MCTrialManager:
@@ -116,29 +119,52 @@ class MCTrialManager:
 
 
     # ----- Private Methods --------------------
-    def _compute_one_trial(self, i: int, results: list[TrialResult], rng: np.random.Generator,
-                           root: NuclideID, N0: int, timestamps: npt.NDArray[np.float64]):
+    def _compute_trial_batch(self, trial_indices: npt.NDArray[np.int_],
+                             child_seqs: list[np.random.SeedSequence], root: NuclideID, N0: int,
+                             timestamps: npt.NDArray[np.float64],
+                             expected_nuclides: list[NuclideID]) -> _WelfordAccumulator:
         """
-        Runs a single perturbed Bateman equation solve (one trial) and stores the result in this 
-        trial's pre-assigned slot.
+        Runs a batch of MC trials sequentially within one worker thread, folding each trial's
+        activity matrix into one local `_WelfordAccumulator` as it's produced.
+
+        Raises `RuntimeError` if any trial's nuclide list is not the same as `expected_nuclides`.
 
         Parameters
         ----------
-        - `i`:           Trial index; determines this trial's slot in `results`
-        - `results`:     Shared pre-sized list this trial writes its result into, at index `i`
-        - `rng`:         This trial's own `Generator` for MC perturbation
-        - `root`:        Root nuclide to solve from
-        - `N0`:          Initial atom count of `root`
-        - `timestamps`:  1D array of time points (in seconds) to evaluate at
+        - `trial_indices`:              Trial indices assigned to this worker, drawn from 
+                                        `np.array_split` over the full trial range
+        - `child_seqs`:                 Full per-trial `SeedSequence` list; only entries at 
+                                        `trial_indices` are used by this call
+        - `root`, `N0`, `timestamps`:   Parameters for each trial's `BatemanEqnSolver`
+        - `expected_nuclides`:          Canonical nuclide ordering every trial is validated against
+
+        Returns
+        -------
+        `_WelfordAccumulator` over this batch's trials.
         """
 
-        bateman_solver  = BatemanEqnSolver(self._dag, root, N0, timestamps, rng)
+        acc = None      # Trial data accumulator
 
-        results[i] = TrialResult(
-            atom_count_vals = bateman_solver.get_atom_count_matrix(),
-            activity_vals   = bateman_solver.get_activity_matrix(),
-            nuclides        = bateman_solver.get_nuclides_list()
-        )
+        for i in trial_indices:
+            rng    = np.random.default_rng(child_seqs[i])
+            solver = BatemanEqnSolver(self._dag, root, N0, timestamps, rng)
+
+            if solver.get_nuclides_list() != expected_nuclides:
+                raise RuntimeError("Nuclide ordering diverged across trials - unsafe to accumulate.")
+
+            activity = solver.get_activity_matrix()
+
+            # Create accumulator data structure if it does not exist
+            if acc is None:
+                acc = _WelfordAccumulator(
+                    count = 0,
+                    mean  = np.zeros_like(activity),
+                    M2    = np.zeros_like(activity)
+                )
+
+            _welford_update(acc, activity)      # Update accumulator with latest trial activity values
+
+        return acc
 
 
     # ----- Public Methods --------------------
@@ -149,13 +175,15 @@ class MCTrialManager:
 
         Workflow
         --------
-        - Spawn `trials` child `SeedSequence`s.
-        - For each trial (run concurrently): construct that trial's own `Generator` from its
-          child sequence, build a fresh `BatemanEqnSolver`, and store its atom-count/activity
-          matrices in this trial's pre-assigned slot.
-        - Once all trials complete: compute the per-nuclide, per-timestamp standard deviation of
-          activity across trials, and run one additional deterministic solve to get a non-perturbed 
-          activity baseline.
+        - Run one deterministic (unperturbed) solve to get the non-perturbed activity baseline;
+          its nuclide ordering also becomes the canonical order every trial is validated against.
+        - Spawn `trials` child `SeedSequence`s, then split the trial range into up to
+          `_MC_WORKER_COUNT` contiguous batches.
+        - For each batch (run concurrently, one worker thread per batch): sequentially solve
+          every trial in the batch and fold its activity matrix into one local Welford
+          accumulator.
+        - Once all batches complete: merge each worker's accumulator into one global accumulator
+          and derive the per-nuclide, per-timestamp standard deviation from it.
 
         Parameters
         ----------
@@ -168,33 +196,40 @@ class MCTrialManager:
         `RootResult` for the given `root`, `N0`, `timestamps`.
         """
 
-        # Each trial has a pre-assigned slot in the list which depends on its trial number
-        trial_results: list[TrialResult] = [None] * self._trials
+        # Deterministic (unperturbed) Bateman equation solve
+        # Also establishes the canonical nuclide ordering that every trial is validated against 
+        # before being accumulated
+        non_perturbed_bateman  = BatemanEqnSolver(self._dag, root, N0, timestamps, None)
+        non_perturbed_activity = non_perturbed_bateman.get_activity_matrix()
+        non_perturbed_nuclides = non_perturbed_bateman.get_nuclides_list()
 
         # Spawn one independent child SeedSequence per trial
         seed_seq    = np.random.SeedSequence() if self._seed is None \
             else np.random.SeedSequence(self._seed)
         child_seqs  = seed_seq.spawn(self._trials)
 
-        # Calculates the Bateman equation for each trial in parallel
-        with ThreadPoolExecutor(max_workers=_MC_WORKER_COUNT) as executor:
-            futures = [executor.submit(self._compute_one_trial, i, trial_results,
-                                       np.random.default_rng(child_seqs[i]),
-                                       root, N0, timestamps)
-                       for i in range(self._trials)]
+        # Split the trial range into contiguous batches, one per worker. Capped at self._trials
+        # so no worker ever gets an empty batch.
+        num_workers = min(_MC_WORKER_COUNT, self._trials)
+        batches     = np.array_split(np.arange(self._trials), num_workers)
 
-            for future in futures:
-                future.result()
+        # Runs each batch of trials in its own thread, each returning one local accumulator
+        with ThreadPoolExecutor(max_workers=num_workers) as executor:
+            futures = [executor.submit(self._compute_trial_batch, batch, child_seqs,
+                                       root, N0, timestamps, non_perturbed_nuclides)
+                       for batch in batches]
 
-        # Calculate the standard deviation of activity across trials, per nuclide per timestamp
-        activity_std = _calc_activity_std(trial_results)
+            batch_accs = [future.result() for future in futures]
 
-        # Deterministic (unperturbed) Bateman equation solve
-        non_perturbed_bateman  = BatemanEqnSolver(self._dag, root, N0, timestamps, None)
-        non_perturbed_activity = non_perturbed_bateman.get_activity_matrix()
-        non_perturbed_nuclides = non_perturbed_bateman.get_nuclides_list()
+        # Merge every worker's local accumulator into one global accumulator over all trials
+        total_acc = batch_accs[0]
+        for acc in batch_accs[1:]:
+            total_acc = _welford_merge(total_acc, acc)
+
+        # Calculate standard deviation of activity, per timestamp, per nuclide
+        activity_std = np.sqrt(total_acc.M2 / (total_acc.count - 1))
 
         return RootResult(
-            perturbed_activity_std  = BatemanEqnSolver.create_nuclide_map(activity_std, trial_results[0].nuclides),
+            perturbed_activity_std  = BatemanEqnSolver.create_nuclide_map(activity_std, non_perturbed_nuclides),
             non_perturbed_activity  = BatemanEqnSolver.create_nuclide_map(non_perturbed_activity, non_perturbed_nuclides)
         )
