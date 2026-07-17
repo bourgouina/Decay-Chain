@@ -1,3 +1,4 @@
+import os
 import numpy as np
 import numpy.typing as npt
 from concurrent.futures import ThreadPoolExecutor
@@ -12,7 +13,7 @@ Map = dict[NuclideID, npt.NDArray[np.float64]]
 
 
 # ----- Constants --------------------
-_MC_WORKER_COUNT = 20
+_MC_WORKER_COUNT = os.cpu_count() - 2
 
 
 # ----- Data Classes --------------------
