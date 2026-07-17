@@ -17,14 +17,18 @@ class TrialResult:
     """
     Stores the results of a single Bateman equation solve (one trial) for one root nuclide.
 
+    `atom_count_vals` and `activity_vals` are raw `(T, V)` matrices. 
+
+    Column `v` of either matrix corresponds to `nuclides[v]`.
+
+    Use `BatemanEqnSolver.create_nuclide_map()` to convert a matrix to a `{nuclide: array}` dict if 
+    needed.
+
     Attributes
     ----------
-    - `atom_count_vals`:    Maps each reachable nuclide to its `N(t)` atom count array over the
-                            requested timestamps
-    - `activity_vals`:      Maps each reachable nuclide to its activity array (`decay_const * N(t)`)
-                            over the requested timestamps
-    - `trial_data`:         Maps each reachable nuclide to its data (maybe perturbed) used in Bateman 
-                            equation calculations.
+    - `atom_count_vals`: `N(t)` atom count numpy matrix, shape `(T, V)`
+    - `activity_vals`:   `A(t)` activity numpy matrix, shape `(T, V)`
+    - `nuclides`:        List of `V` reachable nuclides, ordered to match both matrices' columns
     """
 
     atom_count_vals:    np.ndarray
@@ -32,10 +36,55 @@ class TrialResult:
     nuclides:           list[NuclideID]
 
 
+@dataclass
+class RootResult:
+    """
+    Stores the aggregated result of all MC trials for a single root nuclide and `N0`.
+
+    Attributes
+    ----------
+    - `perturbed_activity_std`: Maps each reachable nuclide to its per-timestamp standard
+                                deviation of activity across trials.
+    - `non_perturbed_activity`: Maps each reachable nuclide to its activity array from a single
+                                deterministic solve.
+    """
+
+    perturbed_activity_std: Map
+    non_perturbed_activity: Map
+
+
 # ----- Constants --------------------
 _ROOT_WORKER_COUNT = 5
 _TRIAL_WORKER_COUNT = 50
 THREAD_COUNT = 20
+
+
+# ----- Helper Methods --------------------
+def _calc_activity_std(results: list[TrialResult]) -> np.ndarray:
+    """
+    Computes standard deviation of activity per nuclide per timestamp across trials.
+
+    Raises `RuntimeError` if every trial's `nuclides` list does not match positionally as it means 
+    that the ordering of the rows is not uniform and the calculated standard deviation value will 
+    be incorrect.
+
+    Parameters
+    ----------
+    - `results`: List of `TrialResult`s (one per trial)
+
+    Returns
+    -------
+    Numpy array of shape `(T, V)` — standard deviation of activity per timestamp, per nuclide; 
+    `ddof=1` since trials are a finite sample estimating the true MC variance, not a full population.
+    """
+
+    nuclides = results[0].nuclides
+    if not all(r.nuclides == nuclides for r in results):
+        raise RuntimeError("Nuclide ordering diverged across trials — unsafe to stack columns directly")
+
+    stacked = np.stack([r.activity_vals for r in results], axis=0)   # (trials, T, V)
+
+    return stacked.std(axis=0, ddof=1)
 
 
 class ConcurrentComputationHandler:
@@ -48,8 +97,8 @@ class ConcurrentComputationHandler:
         ----------
         - `dag`:    Fully built decay chain DAG, shared across all root computations
 
-        - `trials`: Number of MC trials to run per root. `1` runs a single deterministic
-                    (unperturbed) solve per root, and no `Generator` is constructed.
+        - `trials`: Number of MC trials to run per root. Must be greater than 1 as standard deviation 
+                    is undefined for a single sample.
 
         - `seed`:   Test-mode determinism switch. 
                     When set, every root constructs its `SeedSequence` from the same seed, and 
@@ -61,34 +110,30 @@ class ConcurrentComputationHandler:
                     trials — appropriate for production MC runs.
         """
 
-        # Gaurd against negative trial count
-        if trials < 1:
-            raise RuntimeError("Trial count needs to be at least 1.")
+        # Guard against trial counts that can't produce a meaningful MC standard deviation
+        if trials <= 1:
+            raise RuntimeError("Trial count needs to be greater than 1.")
         
         self._dag       = dag
         self._trials    = trials
         self._seed      = seed
-        self._compute_vals: dict[tuple[NuclideID, int], list[TrialResult]] = {}
+        self._compute_vals: dict[tuple[NuclideID, int], RootResult] = {}
     
 
     # ----- Private Methods --------------------
     def _compute_one_root(self, root: NuclideID, N0: int, timestamps: npt.NDArray[np.float64]):
         """
-        Runs all trials for a single root nuclide and stores the results.
-
-        Builds one `SeedSequence` for this root (or skips it, if `trials == 1`) and spawns
-        `trials` independent child sequences from it up front, before any trial thread is
-        submitted. Each trial thread then constructs its own `Generator` from its child
-        sequence, so trials never share a mutable `Generator` object — each trial's draws
-        are isolated from every other concurrently running trial for this root.
+        Runs all trials for a single root nuclide, aggregates them, and stores the result.
 
         Workflow
         --------
-        - Spawn `trials` child `SeedSequence`s for this root (skipped if `trials == 1`).
-        - For each trial: construct that trial's own `Generator` from its child sequence
-          (or `None` for a deterministic solve), build a fresh `BatemanEqnSolver`, evaluate
-          atom counts, derive activity values from the solver's own cached trial data, and
-          store the result in this trial's pre-assigned slot.
+        - Spawn `trials` child `SeedSequence`s for this root.
+        - For each trial (run concurrently): construct that trial's own `Generator` from its
+          child sequence, build a fresh `BatemanEqnSolver`, and store its atom-count/activity
+          matrices in this trial's pre-assigned slot.
+        - Once all trials complete: compute the per-nuclide, per-timestamp standard deviation of
+          activity across trials, and run one additional deterministic (`rng=None`) solve to get
+          a non-perturbed activity baseline. Store both as a `RootResult`.
 
         Parameters
         ----------
@@ -98,38 +143,48 @@ class ConcurrentComputationHandler:
         """
 
         # Each trial has a pre-assigned slot in the list which depends on its trial number
-        self._compute_vals[(root, N0)] = [None] * self._trials
+        trial_results: list[TrialResult] = [None] * self._trials
 
-        # If no. of trials is greater than 1, spawn one independent child SeedSequence per trial, 
-        # up front, so each trial's Generator is constructed from its own child rather than a shared 
-        # object
-        child_seqs = None
-
-        if self._trials > 1:
-            seed_seq    = np.random.SeedSequence() if self._seed is None \
-                else np.random.SeedSequence(self._seed)
-            child_seqs  = seed_seq.spawn(self._trials)
+        # Spawn one independent child SeedSequence per trial
+        seed_seq    = np.random.SeedSequence() if self._seed is None \
+            else np.random.SeedSequence(self._seed)
+        child_seqs  = seed_seq.spawn(self._trials)
 
         # Calculates the Bateman equation for each trial in parallel
         with ThreadPoolExecutor(max_workers=THREAD_COUNT) as executor:
-            futures = [executor.submit(self._compute_one_trial, i, 
-                                       np.random.default_rng(child_seqs[i]) if self._trials > 1 else None, 
+            futures = [executor.submit(self._compute_one_trial, i, trial_results,
+                                       np.random.default_rng(child_seqs[i]),
                                        root, N0, timestamps)
                        for i in range(self._trials)]
 
             for future in futures:
                 future.result()
+        
+        # Calculate the standard deviation of activity across trials, per nuclide per timestamp
+        activity_std = _calc_activity_std(trial_results)
+
+        # Deterministic (unperturbed) Bateman equation solve
+        non_perturbed_bateman  = BatemanEqnSolver(self._dag, root, N0, timestamps, None)
+        non_perturbed_activity = non_perturbed_bateman.get_activity_matrix()
+        non_perturbed_nuclides = non_perturbed_bateman.get_nuclides_list()
+
+        self._compute_vals[(root, N0)] = RootResult(
+            perturbed_activity_std  = BatemanEqnSolver.create_nuclide_map(activity_std, trial_results[0].nuclides),
+            non_perturbed_activity  = BatemanEqnSolver.create_nuclide_map(non_perturbed_activity, non_perturbed_nuclides)
+        )
     
 
-    def _compute_one_trial(self, i: int, rng: np.random.Generator | None, root: NuclideID, N0: int, 
-                           timestamps: npt.NDArray[np.float64]):
+    def _compute_one_trial(self, i: int, results: list[TrialResult], rng: np.random.Generator | None, 
+                           root: NuclideID, N0: int, timestamps: npt.NDArray[np.float64]):
         """
         Runs a single Bateman equation solve (one trial) for one root nuclide and stores
         the result in this trial's pre-assigned slot.
 
         Parameters
         ----------
-        - `i`:           Trial index; determines this trial's slot in the results list
+        - `i`:           Trial index; determines this trial's slot in `results`
+        - `results`:     Shared pre-sized list this trial writes its result into, at index `i`.
+                         Safe under concurrent trial threads since each writes a distinct index.
         - `rng`:         This trial's own `Generator` for MC perturbation, or `None` for
                          a deterministic (unperturbed) solve
         - `root`:        Root nuclide to solve from
@@ -139,7 +194,7 @@ class ConcurrentComputationHandler:
 
         bateman_solver  = BatemanEqnSolver(self._dag, root, N0, timestamps, rng)
                     
-        self._compute_vals[(root, N0)][i] = TrialResult(
+        results[i] = TrialResult(
             atom_count_vals = bateman_solver.get_atom_count_matrix(),
             activity_vals   = bateman_solver.get_activity_matrix(),
             nuclides        = bateman_solver.get_nuclides_list()
@@ -159,7 +214,7 @@ class ConcurrentComputationHandler:
 
         Returns
         -------
-        Dict mapping `(root nuclide, N0)` to a list of `TrialResult`, one entry per trial.
+        Dict mapping `(root nuclide, N0)` to a `RootResult`.
         """
 
         # Does Monte-Carlo simulations for each root in parallel
