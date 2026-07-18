@@ -353,6 +353,7 @@ class DecayChainDAG:
         """
         Returns a copy of the `Nuclide` data for the requested nuclide required for Bateman 
         equation calculations.
+        Raises `RuntimeError` if nuclide is not in decay chain DAG.
 
         If `rng` is `None`, returns a copy of the nuclide's stored (unperturbed) data. 
         If `rng` is provided, returns freshly perturbed data — computed fresh on every call.
@@ -369,6 +370,9 @@ class DecayChainDAG:
         -------
         `BatemanCalData` instance.
         """
+
+        if nuclide not in self.nuclides:
+            raise RuntimeError(f"Nuclide {nuclide} is not in decay chain DAG.")
 
         if rng is not None:
             return self._perturbed_nuclide_data(nuclide, rng)
@@ -411,3 +415,25 @@ class DecayChainDAG:
             for transition in nuclide.decay_transitions:
                 if transition.branching_unc is None:
                     transition.branching_unc = min_uncertainty
+    
+
+    def get_missing_data(self) -> tuple[set[NuclideID], set[NuclideID]]:
+        """
+        Returns nuclides in DAG which are missing uncertainty values.
+
+        Returns tuple of the form:
+        `(set of nuclides missing decay uncertainty, set of nuclides missing branching ratio uncertainty)`
+        """
+
+        decay_uncs  = []
+        br_uncs     = []
+
+        for nuclide, data in self.nuclides.items():
+            if data.decay_unc is None:
+                decay_uncs.append(nuclide)
+            
+            for transition in data.decay_transitions:
+                if transition.branching_unc is None:
+                    br_uncs.append(nuclide)
+        
+        return (set(decay_uncs), set(br_uncs))

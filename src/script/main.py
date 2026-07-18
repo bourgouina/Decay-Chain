@@ -17,6 +17,7 @@ _N0_RE              = re.compile(r"--N0=(\d+)")
 _LOWERBOUND_RE      = re.compile(r"--lower=(\d+(\.\d+)?([eE][+-]\d+)?)")
 _UPPERBOUND_RE      = re.compile(r"--upper=(\d+(\.\d+)?([eE][+-]\d+)?)")
 _TIMESTAMP_COUNT_RE = re.compile(r"--timestamps=(\d+)")
+_FILL_DATA_RE       = re.compile(r"--fill-data=(.+)")
 
 # NuclideID tuple indexes
 NUCID_SYMBOL    = 0
@@ -31,9 +32,14 @@ CSV_HEADERS = ["timestamp_in_s",
                "nuclide_symbol", "nuclide_meta", "nuclide_mass_num",
                "activity_val", "activity_std"]
 
+# CLI string to show user expected usage
+USAGE_STR = ("USAGE: python -m main --root=<ROOT_NUCLIDE> --N0=<INT> --trials=<INT> "
+             "--lower=<FLOAT> --upper=<FLOAT> --timestamps=<INT> --fill-data=<BOOL>\n"
+             "(parameters can be listed in a different order)")
+
 
 # ----- Helper Methods --------------------
-def parse_params(args: list[str]) -> tuple[NuclideID, int, int, np.ndarray]:
+def parse_params(args: list[str]) -> tuple[NuclideID, int, int, np.ndarray, bool]:
     """
     Parses CLI arguments to program parameters.
     Raises `RuntimeError` if arguments contain a duplicate parameter, unknown parameter or is missing 
@@ -45,19 +51,20 @@ def parse_params(args: list[str]) -> tuple[NuclideID, int, int, np.ndarray]:
 
     Returns
     -------
-    A tuple  of the form `(root nuclide, N0, no. of trials, timestamps array)`
+    A tuple  of the form `(root nuclide, N0, no. of trials, timestamps array, fill missing data)`
     """
 
     root = N0 = trial_count = lowerbound = upperbound = timestamp_count = None
+    fill_data = False
 
     # Extract parameters from args
-    for i in range(len(args)):
+    for arg in args:
         # Root parameter parsing
-        if _ROOT_RE.fullmatch(args[i]):
+        if _ROOT_RE.fullmatch(arg):
             if root is not None:
-                raise RuntimeError(f'Duplicate "--root" parameter: {args[i]!r}')
+                raise RuntimeError(f'Duplicate "--root" parameter: {arg!r}')
             
-            m = _ROOT_RE.fullmatch(args[i])
+            m = _ROOT_RE.fullmatch(arg)
 
             symbol      = m.group(1)
             mass_num    = int(m.group(2))
@@ -67,57 +74,67 @@ def parse_params(args: list[str]) -> tuple[NuclideID, int, int, np.ndarray]:
             continue
 
         # N0 parameter parsing
-        if _N0_RE.fullmatch(args[i]):
+        if _N0_RE.fullmatch(arg):
             if N0 is not None:
-                raise RuntimeError(f'Duplicate "--N0" parameter: {args[i]!r}')
+                raise RuntimeError(f'Duplicate "--N0" parameter: {arg!r}')
             
-            N0 = int(_N0_RE.fullmatch(args[i]).group(1))
+            N0 = int(_N0_RE.fullmatch(arg).group(1))
             continue
 
         # Trial count parameter parsing
-        if _TRIAL_COUNT_RE.fullmatch(args[i]):
+        if _TRIAL_COUNT_RE.fullmatch(arg):
             if trial_count is not None:
-                raise RuntimeError(f'Duplicate "--trials" parameter: {args[i]!r}')
+                raise RuntimeError(f'Duplicate "--trials" parameter: {arg!r}')
             
-            trial_count = int(_TRIAL_COUNT_RE.fullmatch(args[i]).group(1))
+            trial_count = int(_TRIAL_COUNT_RE.fullmatch(arg).group(1))
             continue
         
         # Timestamps lowerbound parameter parsing
-        if _LOWERBOUND_RE.fullmatch(args[i]):
+        if _LOWERBOUND_RE.fullmatch(arg):
             if lowerbound is not None:
-                raise RuntimeError(f'Duplicate "--lower" parameter: {args[i]!r}')
+                raise RuntimeError(f'Duplicate "--lower" parameter: {arg!r}')
             
-            lowerbound = float(_LOWERBOUND_RE.fullmatch(args[i]).group(1))
+            lowerbound = float(_LOWERBOUND_RE.fullmatch(arg).group(1))
             continue
         
         # Timestamps upperbound parameter parsing
-        if _UPPERBOUND_RE.fullmatch(args[i]):
+        if _UPPERBOUND_RE.fullmatch(arg):
             if upperbound is not None:
-                raise RuntimeError(f'Duplicate "--upper" parameter: {args[i]!r}')
+                raise RuntimeError(f'Duplicate "--upper" parameter: {arg!r}')
             
-            upperbound = float(_UPPERBOUND_RE.fullmatch(args[i]).group(1))
+            upperbound = float(_UPPERBOUND_RE.fullmatch(arg).group(1))
             continue
         
         # Timestamps count parameter parsing
-        if _TIMESTAMP_COUNT_RE.fullmatch(args[i]):
+        if _TIMESTAMP_COUNT_RE.fullmatch(arg):
             if timestamp_count is not None:
-                raise RuntimeError(f'Duplicate "--timestamps" parameter: {args[i]!r}')
+                raise RuntimeError(f'Duplicate "--timestamps" parameter: {arg!r}')
             
-            timestamp_count = int(_TIMESTAMP_COUNT_RE.fullmatch(args[i]).group(1))
+            timestamp_count = int(_TIMESTAMP_COUNT_RE.fullmatch(arg).group(1))
+            continue
+
+        # Fill missing data parameter parsing
+        if _FILL_DATA_RE.fullmatch(arg):
+            str_val = _FILL_DATA_RE.fullmatch(arg).group(1)
+
+            if str_val.lower() == "true":
+                fill_data = True
+            elif str_val.lower() == "false":
+                fill_data = False
+            else:
+                raise RuntimeError(f"Unexpected value {arg!r}\n{USAGE_STR}")
+            
             continue
 
         # If this section is reached, then there is an unrecognized parameter
-        raise RuntimeError(f"Unrecognized parameter: {args[i]!r}")
+        raise RuntimeError(f"Unrecognized parameter: {arg!r}")
     
     # Raise RuntimeError if any required argument is missing
     if (root is None) or (N0 is None) or (trial_count is None) or (lowerbound is None) or \
         (upperbound is None) or (timestamp_count is None):
-        raise RuntimeError("Missing required parameters.\n"
-                           "USEAGE: python -m main --root=<ROOT_NUCLIDE> --N0=<INT> --trials=<INT> "
-                           "--lower=<FLOAT> --upper=<FLOAT> --timestamps=<INT>\n"
-                           "(parameters can be listed in a different order)")
+        raise RuntimeError(f"Missing required parameters.\n{USAGE_STR}")
     
-    return (root, N0, trial_count, np.linspace(lowerbound, upperbound, timestamp_count))
+    return (root, N0, trial_count, np.linspace(lowerbound, upperbound, timestamp_count), fill_data)
 
 
 def output_writer(root: NuclideID, results: RootResult, timestamps: np.ndarray):
@@ -159,8 +176,8 @@ def output_writer(root: NuclideID, results: RootResult, timestamps: np.ndarray):
 def main():
     """Entry point to Monte Carlo activity value calculator."""
 
-    root, N0, trial_count, timestamps = parse_params(sys.argv[1:])
-    build_decay_chain_graph()
+    root, N0, trial_count, timestamps, fill_data = parse_params(sys.argv[1:])
+    build_decay_chain_graph(fill_missing_data=fill_data)
 
     mc_manager = MCTrialManager(decay_chain_graph, trial_count)
     results = mc_manager.compute(root, N0, timestamps)
