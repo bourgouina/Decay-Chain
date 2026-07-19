@@ -121,12 +121,14 @@ def _perturb_branching_ratio(rng: np.random.Generator, value: float, unc: float)
     return min(100.0, max(0.0, sample))
 
 
-def _redistribute_to_total(ratios: np.ndarray, uncs: np.ndarray) -> np.ndarray:
+def _redistribute_to_total(ratios: np.ndarray, uncs: np.ndarray, nuclide: NuclideID) -> np.ndarray:
     """
     Adjusts perturbed branching ratio values so that they add up to 100% while each of them still 
     lying in the 0-100 range.
 
     Adjustments are weighted using the uncertainty variance of each branching ratio.
+
+    Raises `ValueError` if there is no way for sampled branching ratios to add up to 100%.
 
     Workflow
     --------
@@ -172,9 +174,10 @@ def _redistribute_to_total(ratios: np.ndarray, uncs: np.ndarray) -> np.ndarray:
         weights      = uncs[active] ** 2
         total_weight = weights.sum()
 
-        # If all active weights are zero, then split remaining redistribution evenly
+        # If all active weights are zero, then the sampled branching ratios cannot sum up to 100%
         if total_weight <= 0.0:
-            weights, total_weight = np.ones(active.sum()), float(active.sum())
+            raise ValueError(f"The uncertainty values of the branching ratios of {nuclide} are "
+                             "too constrained to correct the sampled values back to summing to 100%.")
 
         proposed: np.ndarray    = ratios[active] + correction * (weights / total_weight)
         violates                = (proposed < 0.0) | (proposed > _BRANCHING_TOTAL_PCT)
@@ -233,7 +236,7 @@ class DecayChainDAG:
         node = self.nuclides[nuclide]
 
         decay_const = _perturb_decay_const(rng, node.decay_const, node.decay_unc)
-        transitions = self._sample_transitions(node.decay_transitions, rng)
+        transitions = self._sample_transitions(nuclide, node.decay_transitions, rng)
 
         return BatemanCalcData(
             nuclide             = node.nuclide,
@@ -242,7 +245,7 @@ class DecayChainDAG:
         )
 
 
-    def _sample_transitions(self, decay_transitions: list[DecayTransition], 
+    def _sample_transitions(self, nuclide: NuclideID, decay_transitions: list[DecayTransition], 
                             rng: np.random.Generator) -> list[TransitionEdge]:
         """
         Returns a list sampled branching ratios (1 sample for each decay transition) where each 
@@ -284,7 +287,7 @@ class DecayChainDAG:
         uncs = np.fromiter((t.branching_unc for t in decay_transitions), 
                            dtype=np.float64, count=n)
 
-        ratios = _redistribute_to_total(ratios, uncs)
+        ratios = _redistribute_to_total(ratios, uncs, nuclide)
 
         return [(t.nuclide, ratios[i]) for i, t in enumerate(decay_transitions)]
 
