@@ -14,9 +14,7 @@ Path = tuple[NuclideID, ...]             # Ordered list of NuclideIDs defining d
 # ----- Data Classes --------------------
 @dataclass
 class BatemanState:
-    """
-    Stores relevant sub-expression values of the Bateman eqn
-    """
+    """Sub-expression values of the Bateman eqn for one root-to-node path."""
 
     kk:      float        # Product of edge-weighted lambdas along path
     coeffs:  np.ndarray   # Partial fraction coefficients, one per nuclide in path
@@ -29,12 +27,7 @@ class BatemanEqnSolver:
                  rng: np.random.Generator | None):
         """
         Solves the Bateman equation for all nuclides reachable from `root` in the DAG.
- 
-        On initialization:
-        1. Runs BFS from `root` to compute and cache `BatemanState` for every root-to-node path.
-        2. Evaluates and stores `N(t)` and `A(t)` as numpy matrices for the given starting atom 
-           count and timestamps.
- 
+
         Parameters
         ----------
         - `dag`:    Fully built decay chain DAG, shared across all solver instances
@@ -71,16 +64,8 @@ class BatemanEqnSolver:
     # ----- Private Methods --------------------
     def _compute_bateman_states(self):
         """
-        Performs BFS from `root` over the completed DAG. Computes and caches `BatemanState` for 
-        every root-to-node path incrementally — each state is extended from its parent path's 
-        cached state by one nuclide, avoiding full recomputation.
- 
-        BFS guarantees that when extending a path to depth n, the parent path state at depth n-1
-        is already cached.
-
-        Each nuclide's `BatemanCalcData` is fetched from the DAG at most once and stored in a cache. 
-        This guarantees a single consistent sampled `decay_const`/`decay_transitions` per nuclide within a 
-        solve, which is required for correctness under Monte Carlo perturbation.
+        Performs BFS traversal from `root`, caching a `BatemanState` per root-to-node path and a 
+        `BatemanCalcData` per nuclide.
         """
 
         # Queue also stores path taken along with next nuclide in order to use it as a key to 
@@ -149,24 +134,9 @@ class BatemanEqnSolver:
 
     def _build_batch_arrays(self) -> tuple[np.ndarray, np.ndarray, list[NuclideID]]:
         """
-        Packs cached `BatemanState`s for this root into padded 2D arrays and a grouping matrix,
-        and then evaluates `N(t)` for the timestamps and the root's initial atom count.
- 
-        Shorter paths are padded to `d_max`:
-        - `coeffs`  padded with 0.0 — padded terms contribute nothing to the Bateman sum
-        - `lambdas` padded with 1.0 — arbitrary non-zero, irrelevant since corresponding 
-          `coeffs` are 0
- 
-        `grouping_matrix`:
-        - `grouping_matrix[v, p]` = 1 if path `p` terminates at nuclide `v`, else 0
-        - Allows for grouping of `N(t)` results by terminal nuclide through a single matrix 
-          multiplication operation
- 
-        N(t) evaluation steps, once arrays are built:
-        1. `exp_terms (T, P, d_max)` — one exponential per timestamp, path, and depth position
-        2. `N_paths (T, P)`          — Bateman sum contracted over `d_max`, scaled by `kk` and `N0`
-        3. `N_nuclides (T, V)`       — contributions grouped by terminal nuclide via matrix multiplication
- 
+        Packs cached `BatemanState`s for this root into padded arrays and evaluates `N(t)` for
+        this instance's `N0` and timestamps.
+
         Returns
         -------
         - `N_nuclides`: shape (T, V) — `N(t)` per terminal nuclide, grouped, for this instance's `N0`/`t`
@@ -215,20 +185,20 @@ class BatemanEqnSolver:
 
     # ----- Public Methods --------------------
     def get_atom_count_matrix(self) -> np.ndarray:
-        """
-        """
+        """`N(t)` for every reachable nuclide. Shape (T, V), column order matches `get_nuclides_list`."""
 
         return self._N_nuclides
     
 
     def get_activity_matrix(self) -> np.ndarray:
-        """
-        """
+        """`A(t)` for every reachable nuclide. Shape (T, V), column order matches `get_nuclides_list`."""
 
         return self._A_nuclides
     
     def get_nuclides_list(self) -> list[NuclideID]:
         """
+        Nuclides reachable from `root`, in the column order used by `get_atom_count_matrix`/
+        `get_activity_matrix`.
         """
 
         return self._nuclides
@@ -238,6 +208,8 @@ class BatemanEqnSolver:
     def create_nuclide_map(matrix: np.ndarray, 
                            nuclides: list[NuclideID]) -> dict[NuclideID, np.ndarray]:
         """
+        Converts the (T, V) matrix from `get_atom_count_matrix`/`get_activity_matrix` into a dict 
+        keyed by nuclide, each value the (T,) time-series for that nuclide.
         """
 
         return {nuclide: matrix[:, v] for v, nuclide in enumerate(nuclides)}
