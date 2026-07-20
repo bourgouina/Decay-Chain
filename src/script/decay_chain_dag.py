@@ -17,15 +17,7 @@ _CONVERGENCE_TOL_PCT  = 1e-9     # Correction below this threshold is treated as
 # ----- Data Classes --------------------
 @dataclass
 class BatemanCalcData:
-    """
-    Stores relevant data for Bateman equation calculation.
- 
-    Attributes
-    ----------
-    - `nuclide`:           Nuclide identifier of the torm `(symbol, meta, mass_number)`
-    - `decay_const`:       Decay constant of nuclide (in 1/s)
-    - `decay_transitions`: List of tuples of the form `(daughter nuclide, branching ratio)`
-    """
+    """Snapshot of a nuclide's data used for Bateman equation calculations."""
 
     nuclide:            NuclideID
     decay_const:        float
@@ -34,16 +26,7 @@ class BatemanCalcData:
 
 @dataclass
 class Nuclide:
-    """
-    Stores relevant nuclide data.
-
-    Attributes
-    ----------
-    - `nuclide`:            Nuclide identifier of the form `(symbol, meta, mass_number)`
-    - `decay_const`:        Decay constant value (in 1/s)
-    - `decay_unc`:          Decay constant uncertainty (in 1/s)
-    - `decay_transitions`:  List of `DecayTransition` objects containing transition data for nuclide
-    """
+    """Stored graph node for a nuclide in the decay chain DAG."""
 
     nuclide:            NuclideID
     decay_const:        float
@@ -53,16 +36,7 @@ class Nuclide:
 
 @ dataclass
 class DecayTransition:
-    """
-    Stores relevant decay transition data.
-
-    Attributes
-    ----------
-    - `nuclide`:            Daughter nuclide identifier of the form `(symbol, meta, mass_number)`
-    - `decay_type`:         Decay type (alpha, beta+, ...)
-    - `branching_ratio`:    Branching ratio in % (0-100 range)
-    - `branching_unc`:      Branching ratio uncertainty
-    """
+    """Stored graph edge representing one decay transition from a parent nuclide."""
 
     nuclide:            NuclideID
     decay_type:         str
@@ -73,20 +47,14 @@ class DecayTransition:
 # ----- Private Helpers --------------------
 def _perturb_decay_const(rng: np.random.Generator, value: float, unc: float) -> float:
     """
-    Returns a perturbed decay constant value from within its uncertainty range.
-
-    Sampled using Normal distribution.
-    If sample is less than 0 it is clipped to 0.
+    Returns a perturbed decay constant sampled from `N(value, unc)`, clipped to be non-negative.
+    Raises `RuntimeError` if `unc` is `None`.
 
     Parameters
     ----------
     - `rng`:    Caller-owned `np.random.Generator` instance
     - `value`:  Central value to sample around
     - `unc`:    Standard deviation of the sample
-
-    Returns
-    -------
-    Sampled value.
     """
 
     if unc is None:
@@ -98,20 +66,14 @@ def _perturb_decay_const(rng: np.random.Generator, value: float, unc: float) -> 
 
 def _perturb_branching_ratio(rng: np.random.Generator, value: float, unc: float) -> float:
     """
-    Returns a perturbed branching ratio value from within its uncertainty range.
-
-    Sampled using Normal distribution.
-    Sample value is clamped between 0-100 range (inclusive).
+    Returns a perturbed branching ratio sampled from `N(value, unc)`, clamped to [0, 100].
+    Raises `RuntimeError` if `unc` is `None`.
 
     Parameters
     ----------
     - `rng`:    Caller-owned `np.random.Generator` instance
     - `value`:  Central value to sample around
     - `unc`:    Standard deviation of the sample
-
-    Returns
-    -------
-    Sampled value.
     """
 
     if unc is None:
@@ -123,36 +85,15 @@ def _perturb_branching_ratio(rng: np.random.Generator, value: float, unc: float)
 
 def _redistribute_to_total(ratios: np.ndarray, uncs: np.ndarray, nuclide: NuclideID) -> np.ndarray:
     """
-    Adjusts perturbed branching ratio values so that they add up to 100% while each of them still 
-    lying in the 0-100 range.
-
-    Adjustments are weighted using the uncertainty variance of each branching ratio.
-
-    Raises `ValueError` if there is no way for sampled branching ratios to add up to 100%.
-
-    Workflow
-    --------
-    - Compute the correction needed for the active (not yet frozen) values so that the sum of all 
-      the values (including frozen) sum to 100%.
-    - If all computed values lie in the 0-100 range (inclusive) or if all values are frozen, then 
-      all values are valid and redistribution is complete.
-    - If some computer values are not in the inclusive 0-100 range, clamp them within that range and 
-      freeze them (i.e. they are not altered in future iterations).
-    - Repeat till all values are valid.
-
-    Note
-    ----
-    The redistribution terminates withing `n` iterations where `n` is the no. of branching ratios 
-    as each pass freezes at least one value.
+    Returns `ratios` adjusted so they sum to 100% while each stays within [0, 100], weighted by
+    uncertainty. 
+    Raises `ValueError` if the branching ratios of `nuclide` cannot be made to sum to 100%.
 
     Parameters
     ----------
-    - `ratios`: Sampled values, already individually clipped to `[0, 100]`
-    - `uncs`:   Uncertainty (std dev) of each value, same order/length as `ratios`
-
-    Returns
-    -------
-    Numpy array of adjusted branching ratios.
+    - `ratios`:   Sampled values, already individually clipped to `[0, 100]`
+    - `uncs`:     Uncertainty (std dev) of each value, same order/length as `ratios`
+    - `nuclide`:  Nuclide the ratios belong to, used only for the error message
     """
 
     n      = len(ratios)
@@ -176,8 +117,7 @@ def _redistribute_to_total(ratios: np.ndarray, uncs: np.ndarray, nuclide: Nuclid
 
         # If all active weights are zero, then the sampled branching ratios cannot sum up to 100%
         if total_weight <= 0.0:
-            raise ValueError(f"The uncertainty values of the branching ratios of {nuclide} are "
-                             "too constrained to correct the sampled values back to summing to 100%.")
+            break
 
         proposed: np.ndarray    = ratios[active] + correction * (weights / total_weight)
         violates                = (proposed < 0.0) | (proposed > _BRANCHING_TOTAL_PCT)
@@ -195,6 +135,11 @@ def _redistribute_to_total(ratios: np.ndarray, uncs: np.ndarray, nuclide: Nuclid
         ratios[active_idx[violates]]  = np.clip(proposed[violates], 0.0, _BRANCHING_TOTAL_PCT)
         ratios[active_idx[~violates]] = proposed[~violates]
         active[active_idx[violates]]  = False
+    
+    # Check if it was possible to correct branching ratios so that they followed the constraints
+    if abs(ratios.sum() - _BRANCHING_TOTAL_PCT) >= _CONVERGENCE_TOL_PCT:
+        raise ValueError(f"The uncertainty values of the branching ratios of {nuclide} are "
+                         "too constrained to correct the sampled values back to summing to 100%.")
 
     return ratios
 
@@ -202,15 +147,7 @@ def _redistribute_to_total(ratios: np.ndarray, uncs: np.ndarray, nuclide: Nuclid
 # ----- Custom DAG Datastructure --------------------
 class DecayChainDAG:
     def __init__(self):
-        """
-        DAG representation of a radioactive decay chain.
- 
-        Nodes are nuclides identified by `NuclideID`. Directed edges represent decay transitions
-        from parent to daughter nuclide, weighted by branching probability (%).
- 
-        The graph is shared across all `BatemanEqnSolver` instances — one solver per root nuclide
-        reads from the same DAG. Thread-safe for concurrent reads.
-        """
+        """DAG of nuclides and decay transitions, shared read-only across concurrent solvers."""
 
         self.nuclides: dict[NuclideID, Nuclide] = {}
     
@@ -218,24 +155,21 @@ class DecayChainDAG:
     # ----- Private Methods --------------------
     def _perturbed_nuclide_data(self, nuclide: NuclideID, rng: np.random.Generator) -> BatemanCalcData:
         """
-        Returns perturbed data of the requested nuclide, where the perturbed values are within their 
-        uncertainty ranges.
+        Returns `BatemanCalcData` for `nuclide` with a freshly sampled `decay_const` and 
+        `decay_transitions`.
 
-        Perturbed value sampled using Normal distribution on the allowed uncertainty range.
+        Returns `0` as decay constant without sampling if decay constant central value is 0.
 
         Parameters
         ----------
         - `nuclide`:    Nuclide identifier of the form `(symbol, meta, mass_number)`
         - `rng`:        Caller-owned `np.random.Generator` instance
-
-        Returns
-        -------
-        `BatemanCalcData` instance with sampled `decay_const` and `decay_transitions`.
         """
 
         node = self.nuclides[nuclide]
 
-        decay_const = _perturb_decay_const(rng, node.decay_const, node.decay_unc)
+        decay_const = 0.0 if node.decay_const == 0.0 \
+            else _perturb_decay_const(rng, node.decay_const, node.decay_unc)
         transitions = self._sample_transitions(nuclide, node.decay_transitions, rng)
 
         return BatemanCalcData(
@@ -248,27 +182,14 @@ class DecayChainDAG:
     def _sample_transitions(self, nuclide: NuclideID, decay_transitions: list[DecayTransition], 
                             rng: np.random.Generator) -> list[TransitionEdge]:
         """
-        Returns a list sampled branching ratios (1 sample for each decay transition) where each 
-        sample lies inside the uncertainty range of their respective branching ratio.
-
-        Values sampled using Normal distribution.
-        Ensures that the sum of all the branching ratios add up to 100% while each branching ratio 
-        remains within the 0-100 range (inclusive).
-        
-        Workflow
-        --------
-        - Sample a branching ratio value for each decay transition.
-        - Adjust sample values such that their sum adds up to 100% while each of them lie within 
-          the 0-100 range.
+        Returns sampled `(daughter nuclide, branching ratio)` pairs for `decay_transitions`,
+        adjusted so the branching ratios sum to 100%.
 
         Parameters
         ----------
-        - `decay_transitions`:  Transitions belonging to a single parent nuclide
+        - `nuclide`:            Parent nuclide the transitions belong to
+        - `decay_transitions`:  Transitions belonging to that parent nuclide
         - `rng`:                Caller-owned `np.random.Generator` instance
-
-        Returns
-        -------
-        List of `(daughter nuclide, sampled branching ratio)` tuples.
         """
 
         n = len(decay_transitions)
@@ -287,6 +208,7 @@ class DecayChainDAG:
         uncs = np.fromiter((t.branching_unc for t in decay_transitions), 
                            dtype=np.float64, count=n)
 
+        # Correct branching ratio sample values
         ratios = _redistribute_to_total(ratios, uncs, nuclide)
 
         return [(t.nuclide, ratios[i]) for i, t in enumerate(decay_transitions)]
@@ -295,11 +217,8 @@ class DecayChainDAG:
     # ----- Public Methods --------------------
     def add_nuclide(self, nuclide: NuclideID, decay_const: float, decay_unc: float):
         """
-        Adds a nuclide node to the decay chain.
- 
-        Skips silently if the nuclide already exists — physics guarantees the data would be
-        identical.
- 
+        Adds a nuclide node to the DAG. No-op if `nuclide` already exists.
+
         Parameters
         ----------
         - `nuclide`:        Nuclide identifier of the form `(symbol, meta, mass_number)`
@@ -323,15 +242,12 @@ class DecayChainDAG:
     def add_transition(self, parent: NuclideID, daughter: NuclideID, decay_type: str, 
                        branching_ratio: float, branching_unc: float):
         """
-        Adds a decay transition to the specifc `parent` nuclide.
-
-        Skips silently if the decay transition already exists — physics guarantees the data would 
-        be identical.
+        Adds a decay transition to `parent`. No-op if it already exists.
 
         Parameters
         ----------
-        - `parent`:             Nuclide identifier of parent nuclide of the form `(symbol, meta, mass_number)`
-        - `daughter`:           Nuclide identifier of daughter nuclide of the form `(symbol, meta, mass_number)`
+        - `parent`:             Parent nuclide identifier of the form `(symbol, meta, mass_number)`
+        - `daughter`:           Daughter nuclide identifier of the form `(symbol, meta, mass_number)`
         - `decay_type`:         Decay type
         - `branching_ratio`:    Branching ratio % (0-100 range)
         - `branching_unc`:      Branching ratio uncertainty
@@ -354,24 +270,14 @@ class DecayChainDAG:
 
     def read_nuclide_data(self, nuclide: NuclideID, rng: np.random.Generator | None) -> BatemanCalcData:
         """
-        Returns a copy of the `Nuclide` data for the requested nuclide required for Bateman 
-        equation calculations.
-        Raises `RuntimeError` if nuclide is not in decay chain DAG.
+        Returns a copy of `nuclide`'s data as `BatemanCalcData`; perturbed if `rng` is given,
+        unperturbed otherwise. 
+        Raises `RuntimeError` if `nuclide` is not in the DAG.
 
-        If `rng` is `None`, returns a copy of the nuclide's stored (unperturbed) data. 
-        If `rng` is provided, returns freshly perturbed data — computed fresh on every call.
- 
-        Returns a copy rather than a direct reference to protect graph integrity when the DAG
-        is shared across multiple solvers and threads.
- 
         Parameters
         ----------
-        - `nuclide`: Nuclide identifier as `(symbol, meta, mass_number)`
-        - `rng`:     Caller-owned `np.random.Generator` instance, or `None` for unperturbed data
- 
-        Returns
-        -------
-        `BatemanCalData` instance.
+        - `nuclide`:  Nuclide identifier of the form `(symbol, meta, mass_number)`
+        - `rng`:      Caller-owned `np.random.Generator` instance, or `None` for unperturbed data
         """
 
         if nuclide not in self.nuclides:
@@ -392,16 +298,7 @@ class DecayChainDAG:
 
 
     def fill_missing_data(self):
-        """
-        Fills out uncertainty values for decay constants and branching ratios when they are 
-        undefined.
-
-        Convention
-        ----------
-        - Decay constant uncertainty values are set to 0.
-        - Branching ratio uncertainty values are set to the minimum branching ratio value for that 
-          nuclide.
-        """
+        """Fills in missing decay constant and branching ratio uncertainties in place."""
 
         for nuclide in self.nuclides.values():
             # Set decay constant uncertainty if not set
@@ -421,12 +318,7 @@ class DecayChainDAG:
     
 
     def get_missing_data(self) -> tuple[set[NuclideID], set[NuclideID]]:
-        """
-        Returns nuclides in DAG which are missing uncertainty values.
-
-        Returns tuple of the form:
-        `(set of nuclides missing decay uncertainty, set of nuclides missing branching ratio uncertainty)`
-        """
+        """Returns `(nuclides missing decay uncertainty, nuclides missing branching ratio uncertainty)`."""
 
         decay_uncs  = []
         br_uncs     = []

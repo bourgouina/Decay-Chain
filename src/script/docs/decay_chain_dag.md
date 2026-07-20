@@ -128,8 +128,7 @@ def _redistribute_to_total(ratios: np.ndarray, uncs: np.ndarray, nuclide: Nuclid
         total_weight = weights.sum()
 
         if total_weight <= 0.0:
-            raise ValueError(f"The uncertainty values of the branching ratios of {nuclide} are "
-                             "too constrained to correct the sampled values back to summing to 100%.")
+            break
 
         proposed = ratios[active] + correction * (weights / total_weight)
         violates = (proposed < 0.0) | (proposed > _BRANCHING_TOTAL_PCT)
@@ -143,6 +142,10 @@ def _redistribute_to_total(ratios: np.ndarray, uncs: np.ndarray, nuclide: Nuclid
         ratios[active_idx[violates]]  = np.clip(proposed[violates], 0.0, _BRANCHING_TOTAL_PCT)
         ratios[active_idx[~violates]] = proposed[~violates]
         active[active_idx[violates]]  = False
+
+    if abs(ratios.sum() - _BRANCHING_TOTAL_PCT) >= _CONVERGENCE_TOL_PCT:
+        raise ValueError(f"The uncertainty values of the branching ratios of {nuclide} are "
+                         "too constrained to correct the sampled values back to summing to 100%.")
 
     return ratios
 ```
@@ -178,9 +181,10 @@ Every diagonal entry $2w_i$ is strictly positive whenever $\sigma_i > 0$, so the
 
 | Case | Code behavior | Reason |
 |---|---|---|
-| Every active $\sigma_i = 0$, correction still outstanding | `total_weight <= 0` branch raises `ValueError` | Every branch still free to move is reported as having zero uncertainty, so none of them can legitimately absorb the remaining correction. It is a data problem, not an algorithmic one |
+| Every active $\sigma_i = 0$, correction still outstanding | `total_weight <= 0` breaks out of the loop, then the post-loop check raises `ValueError` | Every branch still free to move is reported as having zero uncertainty, so none of them can legitimately absorb the remaining correction. It is a data problem, not an algorithmic one |
 | One branch's $\sigma_i = 0$, others nonzero | Its weight share is exactly 0 | Matches the infinitely confident ($w_i\to\infty$), should not move convention |
-| Active set exhausted, correction remains | Loop exits with $\sum x_i \neq 100$ | Underlying data is infeasible (central values too far from summing to 100%, uncertainties too tight to bridge the gap). It is a data problem, not an algorithmic one |
+| Active set exhausted, correction remains | `not active.any()` breaks out of the loop, then the post-loop check raises `ValueError` | Underlying data is infeasible (central values too far from summing to 100%, uncertainties too tight to bridge the gap). It is a data problem, not an algorithmic one |
+| Iteration cap ($n$ passes) reached without converging | Loop ends naturally, then the post-loop check raises `ValueError` | Covers the theoretical case where every branch gets frozen one at a time, right up to the last allowed pass, without the sum ever landing within tolerance. Same underlying cause as the row above: infeasible input data |
 
 ---
 
@@ -221,13 +225,30 @@ def read_nuclide_data(self, nuclide, rng) -> BatemanCalcData:
 
 But since $k\le 3$ in most cases, $O(k)=O(1)$
 
-### Building The DAG — $O(N)$ (One-time Cost)
+### Initialization — $O(N)$
 
 $N$ = number of nuclides, $E$ = total transitions across the graph.
+
+Covers the one-time costs incurred while building and preparing the DAG, before any solving begins.
+
+#### Building The DAG
 
 - Each nuclide needs to be inserted one by one — $O(N)$ total.
 - For each nuclide, each decay transition needs to be inserted one by one. This adds up to $E$ transitions in total so the total runtime for it is $O(E)$.
 - But since $k$ is capped at 3 in most cases, $E\le 3N$. Therefore, $O(E)=O(N)$.
+
+#### `fill_missing_data`
+
+- Each nuclide is visited once — $O(N)$ total.
+- For each nuclide, finding the minimum branching ratio and filling in missing uncertainties both walk that nuclide's own transitions once. Summed across all nuclides this is $O(E)$.
+- Same as above, $E\le 3N$ in practice since $k\le 3$, so $O(E)=O(N)$.
+
+#### `get_missing_data`
+
+- Each nuclide is visited once, and its transitions are scanned once, for the same $O(N + E) = O(N)$ reasoning as above.
+- Building the two returned sets from the collected lists is an additional $O(N)$ pass, which doesn't change the overall order.
+
+`fill_missing_data` and `get_missing_data` are used exclusively — only one of the two is ever called in a given run. Their costs don't stack; the one-time DAG-lifecycle overhead is $O(N)$ from whichever of the two runs, not $O(N)$ from each.
 
 ---
 
