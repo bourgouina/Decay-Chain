@@ -144,21 +144,23 @@ $$\texttt{N\_nuclides}[t, v] = \sum_{p=1}^{P} \texttt{N\_paths}[t, p] \cdot G_{v
 
 ---
 
-## Time Complexity — $O(T \cdot P \cdot (d_{\max} + V))$
+## Time Complexity — $O(T \cdot P \cdot V)$
 
-- Computing `BatemanState`s (**`_compute_bateman_states`**) — $O(P \cdot d_{\max})$:
+Since the DAG has no cycles, a path of length $d_{\max}$ visits $d_{\max}$ distinct nuclides, all among the $V$ nuclides reachable from `root` — so $d_{\max} \le V$.
+
+- Computing `BatemanState`s (**`_compute_bateman_states`**) — $O(P \cdot d_{\max}) \le O(P \cdot V)$:
     - Calculations inside the BFS loop — $O(d_{\max})$
     - The BFS loop runs for $P$ iterations since it enumerates every unique path.
 
-- Calculating $N(t)$ for all nuclides — $O(T \cdot P \cdot (d_{\max} + V))$:
-    - Calculating `exp_terms` and summing over `d_max` — $O(T \cdot P \cdot d_{\max})$
+- Calculating $N(t)$ for all nuclides — $O(T \cdot P \cdot V)$:
+    - Calculating `exp_terms` and summing over `d_max` — $O(T \cdot P \cdot d_{\max}) \le O(T \cdot P \cdot V)$
     - Grouping matrix multiplication — $O(T \cdot P \cdot V)$
 
 - Calculating $A(t)$ for all nuclides — $O(T \cdot V)$
 
-## Space Complexity — $O(T \cdot P \cdot d_{\max})$
+## Space Complexity — $O(T \cdot P \cdot V)$
 
-- **`_path_cache`** — $O(P \cdot d_{\max})$
+- **`_path_cache`** — $O(P \cdot d_{\max}) \le O(P \cdot V)$
 - **`_nuclide_cache`** — $O(V)$
-- **`exp_terms`** — $O(T \cdot P \cdot d_{\max})$
+- **`exp_terms`** — $O(T \cdot P \cdot d_{\max}) \le O(T \cdot P \cdot V)$
 - **`_N_nuclides` / `_A_nuclides`** — $O(T \cdot V)$ each
